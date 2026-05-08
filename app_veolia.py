@@ -4,10 +4,30 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import io
 
-MATERIALS_FILE = "list_classes.txt"
+MATERIALS_FILE = "list_classes.csv"
 
-with open(MATERIALS_FILE, "r", encoding="utf-8") as f:
-    material_classes = [line.strip() for line in f if line.strip()]
+
+def load_material_classes(csv_file: str) -> list[str]:
+    df = pd.read_csv(csv_file, encoding="utf-8")
+
+    # if df.shape[1] != 1:
+    #     raise ValueError("Le fichier list_classes.csv doit contenir une seule colonne.")
+
+    column_name = df.columns[0]
+    # print(column_name)
+    # print(df)
+
+    return (
+        df[column_name]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .loc[lambda s: s != ""]
+        .tolist()
+    )
+
+
+material_classes = load_material_classes(MATERIALS_FILE)
 
 
 # ── PAGE CONFIG ───────────────────────────────────────────────────────────────
