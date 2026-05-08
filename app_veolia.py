@@ -3,6 +3,7 @@ import datetime as dt
 import pandas as pd
 import matplotlib.pyplot as plt
 import io
+import dropbox
 
 MATERIALS_FILE = "list_classes.csv"
 
@@ -31,6 +32,8 @@ def load_column_from_csv(csv_file: str) -> list[str]:
 
 material_classes = load_column_from_csv(MATERIALS_FILE)
 sensor_list  = load_column_from_csv(SENSORS_FILE)
+
+
 
 # ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -383,6 +386,27 @@ def build_excel_export() -> io.BytesIO:
     return buf
 
 
+def upload_to_dropbox(excel_buffer, file_name):
+    """Envoie le buffer Excel vers le dossier Dropbox configuré."""
+    try:
+        # Initialisation du client avec le token des secrets
+        dbx = dropbox.Dropbox(st.secrets["DROPBOX_ACCESS_TOKEN"])
+        
+        # Préparation du chemin complet
+        path = st.secrets.get("DROPBOX_DESTINATION_PATH", "/")
+        full_path = f"{path}{file_name}".replace("//", "/")
+        
+        # Upload du contenu du buffer (getvalue)
+        dbx.files_upload(
+            excel_buffer.getvalue(), 
+            full_path, 
+            mode=dropbox.files.WriteMode.overwrite
+        )
+        return True
+    except Exception as e:
+        st.error(f"Erreur lors de l'envoi vers Dropbox : {e}")
+        return False
+    
 # ── TITLE ─────────────────────────────────────────────────────────────────────
 st.title("Résultat de caractérisation")
 
@@ -628,11 +652,26 @@ with tab_summary:
         st.divider()
 
     if not st.session_state["df_weighings"].empty:
+        # Génération du fichier en mémoire
+        excel_data = build_excel_export()
+        
+        # Nom du fichier basé sur la date et le capteur
+        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M")
+        sensor_name = st.session_state["saved_sensor_name"].replace(" ", "_")
+        filename = f"Resultat_{FACILITY_NAME}_{sensor_name}_{timestamp}.xlsx"
+
+        # 1. Bouton de téléchargement local (pour l'utilisateur)
         st.download_button(
-            "⬇️ Télécharger le fichier Excel",
-            data=build_excel_export(),
-            file_name="resultats_caracterisation.xlsx",
+            "⬇️ Télécharger le fichier Excel localement",
+            data=excel_data,
+            file_name=filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+        # 2. Bouton pour envoyer vers Dropbox (Cloud)
+        if st.button("☁️ Sauvegarder dans le Cloud (Dropbox)"):
+            with st.spinner("Envoi en cours..."):
+                if upload_to_dropbox(excel_data, filename):
+                    st.success(f"Fichier '{filename}' sauvegardé avec succès sur Dropbox !")
     else:
         st.info("Aucune pesée enregistrée — l'export sera disponible ici.")
