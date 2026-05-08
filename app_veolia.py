@@ -387,16 +387,17 @@ def build_excel_export() -> io.BytesIO:
 
 
 def upload_to_dropbox(excel_buffer, file_name):
-    """Envoie le buffer Excel vers le dossier Dropbox configuré."""
     try:
-        # Initialisation du client avec le token des secrets
-        dbx = dropbox.Dropbox(st.secrets["DROPBOX_ACCESS_TOKEN"])
+        # Initialisation avec Refresh Token pour une connexion permanente
+        dbx = dropbox.Dropbox(
+            app_key=st.secrets["DROPBOX_APP_KEY"],
+            app_secret=st.secrets["DROPBOX_APP_SECRET"],
+            oauth2_refresh_token=st.secrets["DROPBOX_REFRESH_TOKEN"]
+        )
         
-        # Préparation du chemin complet
         path = st.secrets.get("DROPBOX_DESTINATION_PATH", "/")
         full_path = f"{path}{file_name}".replace("//", "/")
         
-        # Upload du contenu du buffer (getvalue)
         dbx.files_upload(
             excel_buffer.getvalue(), 
             full_path, 
