@@ -58,6 +58,7 @@ if "df_weighings" not in st.session_state:
     )
 
 
+
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 def check_entry_typo(text: str) -> bool:
     parts = text.strip().split()
