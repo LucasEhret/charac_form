@@ -5,6 +5,10 @@ import matplotlib.pyplot as plt
 import io
 import dropbox
 
+
+DEV_MODE = False
+
+
 MATERIALS_FILE = "list_classes.csv"
 
 SENSORS_FILE = "list_sensors.csv"
@@ -12,6 +16,7 @@ SENSORS_FILE = "list_sensors.csv"
 FACILITY_NAME = "Veolia Bonneuil"  # ← change this for each deployment
 # FACILITY_NAME = "TVL"  # ← change this for each deployment
 
+@st.cache_data
 def load_column_from_csv(csv_file: str) -> list[str]:
     df = pd.read_csv(csv_file, encoding="utf-8", sep=";")
     if FACILITY_NAME not in df.columns:
@@ -152,6 +157,7 @@ def save_metadata() -> None:
     st.session_state["df_collect_times"]    = pd.DataFrame(rows)
     st.session_state["error_message"]       = ""
     _clean_time_widget_keys(nb_sample)
+    # st.rerun()
 
 
 def add_container() -> None:
@@ -175,6 +181,7 @@ def add_container() -> None:
     st.session_state["container_name"]   = ""
     st.session_state["container_weight"] = 0.0
     st.session_state["error_message"]    = ""
+    # st.rerun()
 
 
 def remove_container(container_name: str) -> None:
@@ -190,6 +197,7 @@ def remove_container(container_name: str) -> None:
         .reset_index(drop=True)
     )
     st.session_state["error_message"] = ""
+    st.rerun()
 
 
 def add_weighing() -> None:
@@ -212,13 +220,14 @@ def add_weighing() -> None:
     if material_class is None:
         st.session_state["error_message"] = "Veuillez choisir une classe de matériau."
         return
+    st.toast("Pesée ajoutée !", icon="⚖️")
 
     times = get_sample_collect_times(sample_id)
     if times is None:
-        st.session_state["error_message"] = (
-            "Impossible de trouver les heures de prélèvement de cet échantillon. "
-            "Pensez à enregistrer les métadonnées."
-        )
+        # st.session_state["error_message"] = (
+        #     "Impossible de trouver les heures de prélèvement de cet échantillon. "
+        #     "Pensez à enregistrer les métadonnées."
+        # )
         return
 
     tare_weight = get_container_weight(container_used)
@@ -247,7 +256,7 @@ def add_weighing() -> None:
         [st.session_state["df_weighings"], pd.DataFrame(new_rows)],
         ignore_index=True,
     )
-    st.session_state["sample_nb"]      = 0
+    st.session_state["sample_nb"]      = 1
     st.session_state["material_class"] = None
     st.session_state["container_used"] = None
     st.session_state["gross_weight"]   = ""
@@ -261,6 +270,7 @@ def delete_weighing(idx: int) -> None:
         .reset_index(drop=True)
     )
     st.session_state["error_message"] = ""
+    st.rerun()
 
 
 def summarize_by_material(df: pd.DataFrame) -> pd.DataFrame:
@@ -408,6 +418,87 @@ def upload_to_dropbox(excel_buffer, file_name):
         st.error(f"Erreur lors de l'envoi vers Dropbox : {e}")
         return False
     
+
+def weighing_section():
+    disable_weighing = False
+    if st.session_state["df_collect_times"].empty:
+        disable_weighing = True
+        st.warning("Aucune heure de prélèvement n'a été renseignée.")
+    with st.container(border=True):
+        st.markdown("### Entrée de pesée")
+        col1, col2, col3, col4, col5 = st.columns(5, vertical_alignment="bottom")
+
+        with col1:
+            st.selectbox(
+                "Numéro de l'échantillon",
+                list(range(1, st.session_state["saved_nb_sample"] + 1)),
+                key="sample_nb",
+                index=0, 
+                disabled=disable_weighing
+            )
+        with col2:
+            st.selectbox(
+                "Classe de matériau",
+                material_classes,
+                key="material_class",
+                index=None,
+                placeholder="Choisir...",
+                disabled=disable_weighing,
+                accept_new_options=True
+            )
+        with col3:
+            st.selectbox(
+                "Contenant utilisé",
+                st.session_state["df_containers"]["Contenant"].tolist(),
+                disabled=st.session_state["df_containers"].empty,
+                key="container_used",
+                index=None,
+                placeholder="Choisir...",
+            )
+        with col4:
+            weights_input = st.text_input(
+                "Poids brut (kg)",
+                key="gross_weight",
+                placeholder="Ex: 12.5 14.2",
+                disabled=disable_weighing
+            )
+
+
+        with col5:
+            disable_add_weight = True
+            if st.session_state["sample_nb"] and st.session_state["material_class"]:
+                disable_add_weight = False
+            st.button("✅ Ajouter la pesée", on_click=add_weighing, key="add_weighing_button", use_container_width=True, disabled=disable_add_weight)
+
+                    # Validation en direct (Point 2 précédent)
+        if weights_input:
+            if check_entry_typo(weights_input):
+                vals = [float(w.replace(",", ".")) for w in weights_input.split()]
+                st.caption(f"✅ {len(vals)} pesée(s). Total : **{sum(vals):.3f} kg**")
+
+    # Affichage du tableau
+    df_w = st.session_state["df_weighings"]
+    if df_w.empty:
+        st.info("Aucune pesée enregistrée.")
+    else:
+        h_cols = st.columns([1, 2, 2, 1.5, 1.5, 1])
+        labels = ["#échant.", "Classe", "Contenant", "Brut", "Net", ""]
+        for col, label in zip(h_cols, labels):
+            col.markdown(f"**{label}**")
+            
+        for idx, row in df_w.iterrows():
+            r = st.columns([1, 2, 2, 1.5, 1.5, 1])
+            r[0].write(int(row["N° échantillon"]))
+            # r[1].write(str(row["Début"]))
+            # r[2].write(str(row["Fin"]))
+            r[1].write(row["Classe de matériau"])
+            r[2].write(row["Contenant utilisé"])
+            r[3].write(f"{row['Poids brut']:.3f}")
+            r[4].write(f"{row['Poids net']:.3f}")
+            # Suppression sans st.rerun()
+            if r[5].button("✕", key=f"del_w_{idx}"):
+                delete_weighing(idx)
+
 # ── TITLE ─────────────────────────────────────────────────────────────────────
 st.title("Résultat de caractérisation")
 
@@ -435,7 +526,9 @@ with tab_metadata:
         with r1c4:
             st.number_input(
                 "Nombre d'échantillons",
-                step=1, min_value=1, value=1, format="%d",
+                step=1, 
+                min_value=1, 
+                format="%d",
                 key="_nb_sample",
             )
 
@@ -485,7 +578,7 @@ with tab_containers:
         with col2:
             st.number_input(
                 "Poids du contenant vide (kg)",
-                min_value=0.0, step=0.001, format="%.3f",
+                min_value=0.0, step=0.1, format="%.3f",
                 key="container_weight",
             )
         with col3:
@@ -496,125 +589,31 @@ with tab_containers:
                 key="add_container_button",
             )
 
+
     if st.session_state["df_containers"].empty:
-        st.info("Aucun contenant enregistré.")
+            st.info("Aucun contenant enregistré.")
     else:
+        c1, c2, c3 = st.columns(3)
+        c1.markdown("**Nom du contenant**")
+        c2.markdown("**Poids à vide**")
         for _, row in st.session_state["df_containers"].iterrows():
             c1, c2, c3 = st.columns([3, 2, 1])
             c1.write(row["Contenant"])
             c2.write(f"{row['Poids à vide']:.3f} kg")
+            # Suppression du st.rerun() ici aussi
             if c3.button("Supprimer", key=f"del_{row['Contenant']}"):
                 remove_container(row["Contenant"])
-                st.rerun()
 
 
 # ── TAB 3 : WEIGHING ──────────────────────────────────────────────────────────
 with tab_weighing:
     st.subheader("Résultats de pesée")
-
-    with st.container(border=True):
-        st.markdown("### Entrée de pesée")
-        col1, col2, col3, col4, col5 = st.columns(5, vertical_alignment="bottom")
-
-        with col1:
-            st.selectbox(
-                "Numéro de l'échantillon",
-                list(range(1, st.session_state["saved_nb_sample"] + 1)),
-                key="sample_nb",
-                index=0,
-                placeholder="Choisir...",
-            )
-        with col2:
-            st.selectbox(
-                "Classe de matériau",
-                material_classes,
-                key="material_class",
-                index=None,
-                placeholder="Choisir...",
-            )
-        with col3:
-            st.selectbox(
-                "Contenant utilisé",
-                st.session_state["df_containers"]["Contenant"].tolist(),
-                disabled=st.session_state["df_containers"].empty,
-                key="container_used",
-                index=None,
-                placeholder="Choisir...",
-            )
-        with col4:
-            st.text_input(
-                "Poids brut (kg)",
-                key="gross_weight",
-                placeholder="Séparez chaque pesée par des espaces",
-            )
-        with col5:
-            st.button(
-                "✅ Ajouter la pesée",
-                on_click=add_weighing,
-                key="add_weighing_button",
-            )
-
-    # with st.container(border=True):
-    #     st.markdown("### Entrée de pesée")
-        
-    #     # Row 1 — material class (full width, needs space)
-    #     st.radio(
-    #         "Classe de matériau",
-    #         material_classes,
-    #         key="material_class",
-    #         index=None,
-    #         horizontal=False,
-    #     )
-
-    #     # Row 2 — the rest of the fields
-    #     col1, col2, col3, col4 = st.columns(4, vertical_alignment="bottom")
-    #     with col1:
-    #         st.selectbox(
-    #             "Numéro de l'échantillon",
-    #             list(range(1, st.session_state["saved_nb_sample"] + 1)),
-    #             key="sample_nb", index=None, placeholder="Choisir...",
-    #         )
-    #     with col2:
-    #         st.selectbox(
-    #             "Contenant utilisé",
-    #             st.session_state["df_containers"]["Contenant"].tolist(),
-    #             disabled=st.session_state["df_containers"].empty,
-    #             key="container_used", index=None, placeholder="Choisir...",
-    #         )
-    #     with col3:
-    #         st.text_input(
-    #             "Poids brut (kg)",
-    #             key="gross_weight",
-    #             placeholder="Séparez chaque pesée par des espaces",
-    #         )
-    #     with col4:
-    #         st.button("✅ Ajouter la pesée", on_click=add_weighing, key="add_weighing_button")
-
-    # Weighings table with per-row delete
-    df_w = st.session_state["df_weighings"]
-    if df_w.empty:
-        st.info("Aucune pesée enregistrée.")
-    else:
-        h_cols = st.columns([1, 2, 2, 2, 2, 1.5, 1.5, 1])
-        for col, label in zip(h_cols, ["#échant.", "Début", "Fin", "Classe", "Contenant", "Brut (kg)", "Net (kg)", ""]):
-            col.markdown(f"**{label}**")
-        for idx, row in df_w.iterrows():
-            r = st.columns([1, 2, 2, 2, 2, 1.5, 1.5, 1])
-            r[0].write(int(row["N° échantillon"]))
-            r[1].write(str(row["Début"]))
-            r[2].write(str(row["Fin"]))
-            r[3].write(row["Classe de matériau"])
-            r[4].write(row["Contenant utilisé"])
-            r[5].write(f"{row['Poids brut']:.3f}")
-            r[6].write(f"{row['Poids net']:.3f}")
-            if r[7].button("✕", key=f"del_w_{idx}"):
-                delete_weighing(idx)
-                st.rerun()
+    weighing_section() 
 
 
 # ── TAB 4 : SUMMARY ───────────────────────────────────────────────────────────
 with tab_summary:
-    st.subheader("Résumé de la caractérisation")
+    # st.subheader("Résumé de la caractérisation")
 
     df_summary_by_material = summarize_by_material(st.session_state["df_weighings"])
     total_net_mass = df_summary_by_material["Poids net"].sum() if not df_summary_by_material.empty else 0.0
@@ -670,9 +669,17 @@ with tab_summary:
         )
 
         # 2. Bouton pour envoyer vers Dropbox (Cloud)
-        if st.button("☁️ Sauvegarder dans le Cloud (Dropbox)"):
-            with st.spinner("Envoi en cours..."):
-                if upload_to_dropbox(excel_data, filename):
-                    st.success(f"Fichier '{filename}' sauvegardé avec succès sur Dropbox !")
+        if not DEV_MODE:
+            if st.button("☁️ Sauvegarder dans le Cloud (Dropbox)"):
+                with st.status("Préparation de l'envoi...", expanded=True) as status:
+                    st.write("Génération de l'Excel...")
+                    excel_data = build_excel_export()
+                    st.write("Connexion à Dropbox...")
+                    if upload_to_dropbox(excel_data, filename):
+                        status.update(label="✅ Sauvegardé sur Dropbox !", state="complete", expanded=False)
+                    else:
+                        status.update(label="❌ Échec de l'envoi", state="error")
+        else:
+            st.info("DEV MODE — Dropbox upload désactivé.")
     else:
         st.info("Aucune pesée enregistrée — l'export sera disponible ici.")
