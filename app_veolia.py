@@ -390,7 +390,7 @@ def build_excel_export() -> io.BytesIO:
             {"field": "Total net weight (kg)", "value": round(df_weighings["Poids net"].sum(), 4) if not df_weighings.empty else 0},
             {"field": "Material classes used", "value": ", ".join(sorted(df_weighings["Classe de matériau"].unique())) if not df_weighings.empty else ""},
             {"field": "Containers used",     "value": ", ".join(sorted(df_weighings["Contenant utilisé"].replace("", pd.NA).dropna().unique())) if not df_weighings.empty else ""},
-            {"field": "Export timestamp",    "value": str(dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))},
+            {"field": "Export timestamp", "value": (dt.datetime.now(dt.timezone(dt.timedelta(hours=2))).strftime("%Y-%m-%d %H:%M:%S"))},
         ]).to_excel(writer, sheet_name="Metadata", index=False)
     buf.seek(0)
     return buf
