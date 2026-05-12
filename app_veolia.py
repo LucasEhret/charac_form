@@ -47,7 +47,8 @@ st.set_page_config(
 
 # ── SESSION STATE INIT ────────────────────────────────────────────────────────
 DEFAULTS = {
-    "error_message":      "",
+    "container_error": "",
+    "weighing_error":  "",
     "saved_operator_name": "",
     "saved_test_date":    dt.date.today(),
     "saved_sensor_name":  "1",
@@ -198,15 +199,15 @@ def add_container() -> None:
     try:
         container_weight = float(st.session_state["container_weight"])
     except ValueError:
-        st.session_state["error_message"] = "Le poids doit être un nombre valide."
+        st.session_state["container_error"] = "Le poids doit être un nombre valide."
         return
 
     if not container_name:
-        st.session_state["error_message"] = "Veuillez renseigner un identifiant de contenant."
+        st.session_state["container_error"] = "Veuillez renseigner un identifiant de contenant."
         return
         
     if container_name in st.session_state["df_containers"]["Contenant"].tolist():
-        st.session_state["error_message"] = "Ce contenant existe déjà."
+        st.session_state["container_error"] = "Ce contenant existe déjà."
         return
 
     # Création du petit DataFrame à ajouter avec types explicites
@@ -224,7 +225,7 @@ def add_container() -> None:
     # Nettoyage et rafraîchissement
     st.session_state["container_name"]   = ""
     st.session_state["container_weight"] = 0.0
-    st.session_state["error_message"]    = ""
+    st.session_state["container_error"] = ""
 
 
 def remove_container(container_name: str) -> None:
@@ -239,7 +240,7 @@ def remove_container(container_name: str) -> None:
         .loc[st.session_state["df_weighings"]["Contenant utilisé"] != container_name]
         .reset_index(drop=True)
     )
-    st.session_state["error_message"] = ""
+    st.session_state["container_error"] = ""
     st.rerun()
 
 
@@ -247,7 +248,7 @@ def add_weighing() -> None:
     gross_weight_text = st.session_state["gross_weight"].strip()
 
     if not check_entry_typo(gross_weight_text):
-        st.session_state["error_message"] = (
+        st.session_state["weighing_error"] = (
             "Veuillez vérifier la saisie des poids bruts. "
             "Séparez les poids par des espaces, avec virgule ou point décimal."
         )
@@ -258,10 +259,10 @@ def add_weighing() -> None:
     container_used = st.session_state["container_used"]
 
     if sample_id is None:
-        st.session_state["error_message"] = "Veuillez choisir un numéro d'échantillon."
+        st.session_state["weighing_error"] = "Veuillez choisir un numéro d'échantillon."
         return
     if material_class is None:
-        st.session_state["error_message"] = "Veuillez choisir une classe de matériau."
+        st.session_state["weighing_error"] = "Veuillez choisir une classe de matériau."
         return
     st.toast("Pesée ajoutée !", icon="⚖️")
 
@@ -280,7 +281,7 @@ def add_weighing() -> None:
     for gross_weight in weights:
         net_weight = gross_weight - tare_weight
         if net_weight < 0:
-            st.session_state["error_message"] = (
+            st.session_state["weighing_error"] = (
                 f"Le poids net calculé est négatif ({net_weight:.3f} kg). "
                 "Vérifiez le contenant sélectionné et les poids saisis."
             )
@@ -300,16 +301,19 @@ def add_weighing() -> None:
     new_df["Poids brut"] = new_df["Poids brut"].astype(float)
     new_df["Poids net"] = new_df["Poids net"].astype(float)
 
-    st.session_state["df_weighings"] = pd.concat(
+    if st.session_state["df_weighings"].empty:
+        st.session_state["df_weighings"] = new_df
+    else:
+        st.session_state["df_weighings"] = pd.concat(
             [st.session_state["df_weighings"], new_df],
             ignore_index=True,
-    )
+        )
 
     st.session_state["sample_nb"]      = 1
     st.session_state["material_class"] = None
     st.session_state["container_used"] = None
     st.session_state["gross_weight"]   = ""
-    st.session_state["error_message"]  = ""
+    st.session_state["weighing_error"]  = ""
 
 
 def delete_weighing(idx: int) -> None:
@@ -318,7 +322,7 @@ def delete_weighing(idx: int) -> None:
         .drop(index=idx)
         .reset_index(drop=True)
     )
-    st.session_state["error_message"] = ""
+    st.session_state["weighing_error"] = ""
     st.rerun()
 
 
@@ -488,10 +492,6 @@ def hms_widget(label, key_prefix, on_change_callback):
 # ── TITLE ─────────────────────────────────────────────────────────────────────
 st.title("Résultat de caractérisation")
 
-if st.session_state["error_message"]:
-    st.warning(st.session_state["error_message"])
-
-
 # ── TABS ──────────────────────────────────────────────────────────────────────
 tab_metadata, tab_containers, tab_weighing, tab_summary = st.tabs(
     ["Métadonnées", "Contenants", "Résultats de pesée", "Résumé de la caractérisation"]
@@ -502,7 +502,7 @@ tab_metadata, tab_containers, tab_weighing, tab_summary = st.tabs(
 with tab_metadata:
     init_metadata_widget_state()
     with st.expander("📖 Voir le guide du processus de caractérisation (Aide)"):
-        st.image(".streamlit/images/process carac.png", use_container_width=True)
+        st.image(".streamlit/images/process carac.png", width='stretch')
         st.space()
         st.markdown("""
         ### ➡️ Bien démarrer
@@ -521,11 +521,12 @@ with tab_metadata:
         * Avant de peser, enregistrez vos bacs/cartons dans l'onglet **Contenants**.
         * Donnez-leur un nom clair (ex: "Bac Bleu 1") et saisissez leur **poids à vide (tare)**.
         * L'application calculera automatiquement le **poids net** en soustrayant cette tare.
+        * Il est possible de ne renseigner aucun contenant, dans le cas où vous avez procédé autrement.
 
         ### 3️⃣ Saisie des Pesées
         * Sélectionnez le matériau et le contenant utilisé.
         * **Erreur courante :** Si vous saisissez du texte à la place d'un chiffre pour le poids, une erreur rouge apparaîtra. 
-        * Utilisez le bouton X pour supprimer une ligne en cas d'erreur de saisie.
+        * Utilisez le bouton `X` pour supprimer une ligne en cas d'erreur de saisie.
 
         ---
         """)
@@ -562,11 +563,11 @@ with tab_metadata:
                 hms_widget("Heure de fin", f"_end_{i}", save_metadata)
 
         st.space()
-        st.button(
-            "💾 Enregistrer les métadonnées",
-            on_click=save_metadata,
-            key="save_metadata_button",
-        )
+        # st.button(
+        #     "💾 Enregistrer les métadonnées",
+        #     on_click=save_metadata,
+        #     key="save_metadata_button",
+        # )
 
     st.dataframe(st.session_state["df_collect_times"], hide_index=True)
 
@@ -576,6 +577,8 @@ with tab_containers:
     st.subheader("Contenants")
 
     with st.container(border=True):
+        if st.session_state["container_error"]:
+            st.warning(st.session_state["container_error"])
         st.markdown("### Ajout de contenants")
         st.caption(
             "Ajoutez les contenants utilisés pour peser les matériaux. "
@@ -597,7 +600,7 @@ with tab_containers:
         with col3:
             st.button(
                 "✅ Ajouter contenant",
-                use_container_width=True,
+                width='stretch',
                 on_click=add_container,
                 key="add_container_button",
             )
@@ -626,6 +629,8 @@ with tab_weighing:
         disable_weighing = True
         st.warning("Aucune heure de prélèvement n'a été renseignée.")
     with st.container(border=True):
+        if st.session_state["weighing_error"]:
+            st.warning(st.session_state["weighing_error"])
         st.markdown("### Entrée de pesée")
         col1, col2, col3, col4, col5 = st.columns(5, vertical_alignment="bottom")
 
@@ -669,7 +674,7 @@ with tab_weighing:
             disable_add_weight = True
             if st.session_state["sample_nb"] and st.session_state["material_class"]:
                 disable_add_weight = False
-            st.button("✅ Ajouter la pesée", on_click=add_weighing, key="add_weighing_button", use_container_width=True, disabled=disable_add_weight)
+            st.button("✅ Ajouter la pesée", on_click=add_weighing, key="add_weighing_button", width='stretch', disabled=disable_add_weight)
 
                     # Validation en direct (Point 2 précédent)
         if weights_input:
