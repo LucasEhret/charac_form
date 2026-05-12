@@ -56,7 +56,12 @@ DEFAULTS = {
         "Contenant": pd.Series(dtype="str"),
         "Poids à vide": pd.Series(dtype="float")
     }),
-    "df_collect_times": pd.DataFrame(columns=["N° échantillon", "Début", "Fin"]),
+    "df_collect_times": pd.DataFrame({
+        "Echantillon": pd.Series(dtype="int"),
+        "Date": pd.Series(dtype="object"),
+        "Heure de début": pd.Series(dtype="str"),
+        "Heure de fin": pd.Series(dtype="str")
+    }),
     "df_weighings": pd.DataFrame({
         "N° échantillon":     pd.Series(dtype="int"),
         "Début":              pd.Series(dtype="object"), # ou "datetime64[ns]" si besoin
@@ -92,9 +97,17 @@ def get_sample_collect_times(sample_id: int):
     row = existing.loc[existing["Echantillon"] == sample_id]
     if row.empty:
         return None
+    
+    # On récupère la date de l'échantillon (ou la date globale par défaut)
+    sample_date = row.iloc[0]["Date"] if "Date" in row.columns else st.session_state["saved_test_date"]
+    
+    t_start = dt.time.fromisoformat(row.iloc[0]["Heure de début"])
+    t_end   = dt.time.fromisoformat(row.iloc[0]["Heure de fin"])
+    
+    # On combine la date et l'heure pour l'export
     return {
-        "Début": dt.time.fromisoformat(row.iloc[0]["Heure de début"]),
-        "Fin":   dt.time.fromisoformat(row.iloc[0]["Heure de fin"]),
+        "Début": dt.datetime.combine(sample_date, t_start),
+        "Fin":   dt.datetime.combine(sample_date, t_end),
     }
 
 
@@ -134,10 +147,12 @@ def init_metadata_widget_state() -> None:
     for i in range(1, nb_sample + 1):
         if existing.empty or "Echantillon" not in existing.columns:
             start, end = dt.time(0, 0, 0), dt.time(0, 0, 0)
+            sample_date = st.session_state["saved_test_date"]
         else:
             row   = existing.loc[existing["Echantillon"] == i]
             start = dt.time.fromisoformat(row.iloc[0]["Heure de début"]) if not row.empty else dt.time(0, 0, 0)
             end   = dt.time.fromisoformat(row.iloc[0]["Heure de fin"])   if not row.empty else dt.time(0, 0, 0)
+            sample_date = row.iloc[0]["Date"] if (not row.empty and "Date" in row.columns) else st.session_state["saved_test_date"]
 
         for suffix, val in (
             (f"_start_{i}_h", start.hour), (f"_start_{i}_m", start.minute), (f"_start_{i}_s", start.second),
@@ -146,11 +161,16 @@ def init_metadata_widget_state() -> None:
             if suffix not in st.session_state:
                 st.session_state[suffix] = val
 
+                # Initialisation de la date spécifique
+        if f"_date_{i}" not in st.session_state:
+            st.session_state[f"_date_{i}"] = sample_date
+
 
 def save_metadata() -> None:
     nb_sample = st.session_state["_nb_sample"]
     rows = []
     for i in range(1, nb_sample + 1):
+            s_date = st.session_state.get(f"_date_{i}") or st.session_state["_test_date"]
             # On utilise .get() avec une valeur par défaut de 0 si le champ est None
             h_s = st.session_state.get(f"_start_{i}_h") or 0
             m_s = st.session_state.get(f"_start_{i}_m") or 0
@@ -162,6 +182,7 @@ def save_metadata() -> None:
             
             rows.append({
                 "Echantillon": i,
+                "Date": s_date,
                 "Heure de début": f"{int(h_s):02d}:{int(m_s):02d}:{int(s_s):02d}",
                 "Heure de fin":   f"{int(h_e):02d}:{int(m_e):02d}:{int(s_e):02d}"
             })
@@ -480,7 +501,36 @@ tab_metadata, tab_containers, tab_weighing, tab_summary = st.tabs(
 # ── TAB 1 : METADATA ──────────────────────────────────────────────────────────
 with tab_metadata:
     init_metadata_widget_state()
-    st.subheader("Métadonnées")
+    with st.expander("📖 Voir le guide du processus de caractérisation (Aide)"):
+        st.image(".streamlit/images/process carac.png", use_container_width=True)
+        st.space()
+        st.markdown("""
+        ### ➡️ Bien démarrer
+        Ce formulaire est conçu pour capturer les données de caractérisation en temps réel sur le terrain. 
+        **Toutes les modifications sont enregistrées automatiquement** dès que vous changez de champ.
+
+        ---
+
+        ### 1️⃣ Configuration (Métadonnées)
+        * **Nom du capteur :** Sélectionnez le capteur testé. C'est ce nom qui sera utilisé pour nommer votre fichier final.
+        * **Heures de prélèvement :** Saisissez l'heure, les minutes et les secondes. 
+            * *Astuce :* Si vous laissez un champ vide (affichage `HH`), il sera considéré comme `00`.
+            * *Important :* Vérifiez bien la date pour chaque échantillon si le test dure plus de 24h.
+
+        ### 2️⃣ Gestion des Contenants
+        * Avant de peser, enregistrez vos bacs/cartons dans l'onglet **Contenants**.
+        * Donnez-leur un nom clair (ex: "Bac Bleu 1") et saisissez leur **poids à vide (tare)**.
+        * L'application calculera automatiquement le **poids net** en soustrayant cette tare.
+
+        ### 3️⃣ Saisie des Pesées
+        * Sélectionnez le matériau et le contenant utilisé.
+        * **Erreur courante :** Si vous saisissez du texte à la place d'un chiffre pour le poids, une erreur rouge apparaîtra. 
+        * Utilisez le bouton X pour supprimer une ligne en cas d'erreur de saisie.
+
+        ---
+        """)
+        st.success("✅ **Une fois fini :** Allez dans l'onglet 'Résumé' pour télécharger les données, et les sauvegarder en ligne.")
+    # st.subheader("Métadonnées")
 
     with st.container(border=True):
         st.markdown("### Informations spécifiques au test")
@@ -497,14 +547,19 @@ with tab_metadata:
                 key="_nb_sample",
             )
 
+        # Dans tab_metadata, remplacez la boucle for par celle-ci :
         for i in range(1, int(st.session_state["_nb_sample"]) + 1):
-                    st.divider()
-                    st.subheader(f"Prélèvement de l'échantillon {i}")
-                    col_start, col_end = st.columns(2)
-                    with col_start:
-                        hms_widget("Heure de début", f"_start_{i}", save_metadata)
-                    with col_end:
-                        hms_widget("Heure de fin", f"_end_{i}", save_metadata)
+            st.divider()
+            st.subheader(f"Prélèvement de l'échantillon {i}")
+            
+            # Nouveau widget de date par échantillon
+            st.date_input("Date du prélèvement", key=f"_date_{i}", on_change=save_metadata)
+            
+            col_start, col_end = st.columns(2)
+            with col_start:
+                hms_widget("Heure de début", f"_start_{i}", save_metadata)
+            with col_end:
+                hms_widget("Heure de fin", f"_end_{i}", save_metadata)
 
         st.space()
         st.button(
