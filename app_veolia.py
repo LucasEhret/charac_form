@@ -4,14 +4,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import io
 import dropbox
+import zipfile
 
 
 DEV_MODE = False
 
 
-MATERIALS_FILE = "list_classes.csv"
+MATERIALS_FILE = ".streamlit/ressources/list_classes.csv"
 
-SENSORS_FILE = "list_sensors.csv"
+SENSORS_FILE = ".streamlit/ressources/list_sensors.csv"
 
 FACILITY_NAME = "Veolia Bonneuil"  # ← change this for each deployment
 # FACILITY_NAME = "TVL"  # ← change this for each deployment
@@ -53,6 +54,8 @@ DEFAULTS = {
     "saved_test_date":    dt.date.today(),
     "saved_sensor_name":  "1",
     "saved_nb_sample":    1,
+    "Image": pd.Series(dtype="object"),
+    "image_uploader_key": 0,
     "df_containers": pd.DataFrame({
         "Contenant": pd.Series(dtype="str"),
         "Poids à vide": pd.Series(dtype="float")
@@ -280,6 +283,7 @@ def add_weighing() -> None:
     weights     = [float(w.replace(",", ".")) for w in gross_weight_text.split()]
 
     new_rows = []
+    img_key = f"weighing_image_{st.session_state['image_uploader_key']}"
     for gross_weight in weights:
         net_weight = gross_weight - tare_weight
         if net_weight < 0:
@@ -296,6 +300,7 @@ def add_weighing() -> None:
             "Contenant utilisé":  container_used or "",
             "Poids brut":         gross_weight,
             "Poids net":          net_weight,
+            "Image":              st.session_state[img_key].read() if st.session_state.get(img_key) else None,
         })
 
     new_df = pd.DataFrame(new_rows)
@@ -317,6 +322,7 @@ def add_weighing() -> None:
     st.session_state["container_used"] = None
     st.session_state["gross_weight"]   = ""
     st.session_state["weighing_error"]  = ""
+    st.session_state["image_uploader_key"] += 1
 
 
 def delete_weighing(idx: int) -> None:
@@ -495,6 +501,32 @@ def hms_widget(label, key_prefix, on_change_callback):
         return None
     return dt.time(h, m, s)
 
+
+def build_zip_export() -> io.BytesIO:
+    buf = io.BytesIO()
+    timestamp  = dt.datetime.now(dt.timezone(dt.timedelta(hours=2))).strftime("%Y%m%d_%H%M")
+    sensor_name = st.session_state["saved_sensor_name"].replace(" ", "_")
+    base_name  = f"Resultat_{FACILITY_NAME}_{sensor_name}_{timestamp}"
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+
+        # Excel file
+        excel_buf = build_excel_export()
+        zf.writestr(f"{base_name}.xlsx", excel_buf.read())
+
+        # Images — one per material class (first image found)
+        df_w = st.session_state["df_weighings"]
+        if "Image" in df_w.columns:
+            seen_classes = set()
+            for idx, row in df_w.iterrows():
+                if isinstance(row["Image"], bytes) and row["Classe de matériau"] not in seen_classes:
+                    seen_classes.add(row["Classe de matériau"])
+                    class_safe = row["Classe de matériau"].replace(" ", "_").replace("/", "-")
+                    img_name = f"images/{class_safe}.jpg"
+                    zf.writestr(img_name, row["Image"])
+
+    buf.seek(0)
+    return buf
 # ── TITLE ─────────────────────────────────────────────────────────────────────
 st.title(f"Caractérisation — {FACILITY_NAME}")
 
@@ -707,7 +739,14 @@ with tab_weighing:
                 index=None,
                 placeholder="Choisir...",
             )
-
+        # Optional image
+        img_file = st.file_uploader(
+            "Photo du matériau (optionnel)",
+            type=["jpg", "jpeg", "png"],
+            key=f"weighing_image_{st.session_state['image_uploader_key']}",
+        )
+        if img_file:
+            st.image(img_file, width=200)
         # Row 2 — weight input and submit
         col4, col5 = st.columns([3, 1], vertical_alignment="bottom")
         with col4:
@@ -726,6 +765,7 @@ with tab_weighing:
                 use_container_width=True,
                 disabled=disable_add_weight,
             )
+
 
         if weights_input:
             if check_entry_typo(weights_input):
@@ -759,6 +799,35 @@ with tab_weighing:
 
 # ── TAB 4 : SUMMARY ───────────────────────────────────────────────────────────
 with tab_summary:
+    if not st.session_state["df_weighings"].empty:
+        timestamp   = dt.datetime.now(dt.timezone(dt.timedelta(hours=2))).strftime("%Y%m%d_%H%M")
+        sensor_name = st.session_state["saved_sensor_name"].replace(" ", "_")
+        base_name   = f"Resultat_{FACILITY_NAME}_{sensor_name}_{timestamp}"
+
+        zip_data = build_zip_export()
+        with st.container(border=True):
+            st.subheader("Sauvegarde")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    "⬇️ Télécharger (Excel + photos)",
+                    data=zip_data,
+                    file_name=f"{base_name}.zip",
+                    mime="application/zip",
+                )
+            with col2:
+                if not DEV_MODE:
+                    if st.button("☁️ Sauvegarder dans le Cloud (Dropbox)"):
+                        with st.status("Envoi en cours...", expanded=True) as status:
+                            st.write("Connexion à Dropbox...")
+                            if upload_to_dropbox(zip_data, f"{base_name}.zip"):
+                                status.update(label="✅ Sauvegardé sur Dropbox !", state="complete", expanded=False)
+                            else:
+                                status.update(label="❌ Échec de l'envoi", state="error")
+                else:
+                    st.info("DEV MODE — Dropbox upload désactivé.")
+    else:
+        st.info("Aucune pesée enregistrée — l'export sera disponible ici.")
     # st.subheader("Résumé de la caractérisation")
 
     df_summary_by_material = summarize_by_material(st.session_state["df_weighings"])
@@ -781,7 +850,7 @@ with tab_summary:
         else:
             st.info("Aucune pesée enregistrée — le graphique s'affichera ici.")
 
-    st.divider()
+    # st.divider()
     st.markdown("### Résumé par échantillon")
 
     sample_ids = sorted(
@@ -797,33 +866,3 @@ with tab_summary:
         st.dataframe(df_sample_summary, hide_index=True)
         st.divider()
 
-    if not st.session_state["df_weighings"].empty:
-        # Génération du fichier en mémoire
-        excel_data = build_excel_export()
-        
-        # Nom du fichier basé sur la date et le capteur
-        timestamp = (dt.datetime.now(dt.timezone(dt.timedelta(hours=2))).strftime("%Y%m%d_%H%M"))
-        sensor_name = st.session_state["saved_sensor_name"].replace(" ", "_")
-        filename = f"Resultat_{FACILITY_NAME}_{sensor_name}_{timestamp}.xlsx"
-
-        # 1. Bouton de téléchargement local (pour l'utilisateur)
-        st.download_button(
-            "⬇️ Télécharger le fichier Excel localement",
-            data=excel_data,
-            file_name=filename,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-        # 2. Bouton pour envoyer vers Dropbox (Cloud)
-        if not DEV_MODE:
-            if st.button("☁️ Sauvegarder dans le Cloud (Dropbox)"):
-                with st.status("Préparation de l'envoi...", expanded=True) as status:
-                    st.write("Connexion à Dropbox...")
-                    if upload_to_dropbox(excel_data, filename):
-                        status.update(label="✅ Sauvegardé sur Dropbox !", state="complete", expanded=False)
-                    else:
-                        status.update(label="❌ Échec de l'envoi", state="error")
-        else:
-            st.info("DEV MODE — Dropbox upload désactivé.")
-    else:
-        st.info("Aucune pesée enregistrée — l'export sera disponible ici.")
