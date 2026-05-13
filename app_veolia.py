@@ -312,7 +312,7 @@ def add_weighing() -> None:
             ignore_index=True,
         )
 
-    st.session_state["sample_nb"] = []
+    # st.session_state["sample_nb"] = []
     st.session_state["material_class"] = None
     st.session_state["container_used"] = None
     st.session_state["gross_weight"]   = ""
@@ -507,36 +507,77 @@ tab_metadata, tab_containers, tab_weighing, tab_summary = st.tabs(
 # ── TAB 1 : METADATA ──────────────────────────────────────────────────────────
 with tab_metadata:
     init_metadata_widget_state()
-    with st.expander("📖 Voir le guide du processus de caractérisation (Aide)",expanded=False):
+    with st.expander("📖 Guide d'utilisation", expanded=False):
         st.image(".streamlit/images/process carac.png", width='stretch')
-        st.space()
+
+        st.markdown("## Comment utiliser ce formulaire ?")
+        st.info("💡 Suivez les 4 onglets dans l'ordre. Les données sont sauvegardées automatiquement à chaque saisie — vous ne pouvez pas perdre ce que vous avez entré.")
+
+        st.markdown("---")
+
+        st.markdown("### 1️⃣ Métadonnées — *cet onglet*")
         st.markdown("""
-        ### ➡️ Bien démarrer
-        Ce formulaire est conçu pour capturer les données de caractérisation en temps réel sur le terrain. 
-        **Toutes les modifications sont enregistrées automatiquement** dès que vous changez de champ.
+    Renseignez les informations générales du test **avant de commencer à peser**.
 
-        ---
+    | Champ | Quoi saisir |
+    |---|---|
+    | **Nom** | Votre prénom et nom |
+    | **Date du jour** | La date du test (pré-remplie automatiquement) |
+    | **Nom du capteur** | Le capteur WasteFlow associé à ce test |
+    | **Nombre d'échantillons** | Le nombre de prélèvements effectués |
 
-        ### 1️⃣ Configuration (Métadonnées)
-        * **Nom du capteur :** Sélectionnez le capteur testé. C'est ce nom qui sera utilisé pour nommer votre fichier final.
-        * **Heures de prélèvement :** Saisissez l'heure, les minutes et les secondes. 
-            * *Astuce :* Si vous laissez un champ vide (affichage `HH`), il sera considéré comme `00`.
-            * *Important :* Vérifiez bien la date pour chaque échantillon si le test dure plus de 24h.
+    Pour chaque échantillon, saisissez :
+    - **La date du prélèvement** (si différente de la date du jour)
+    - **L'heure de début et de fin** du prélèvement (HH / MM / SS)
 
-        ### 2️⃣ Gestion des Contenants
-        * Avant de peser, enregistrez vos bacs/cartons dans l'onglet **Contenants**.
-        * Donnez-leur un nom clair (ex: "Bac Bleu 1") et saisissez leur **poids à vide (tare)**.
-        * L'application calculera automatiquement le **poids net** en soustrayant cette tare.
-        * Il est possible de ne renseigner aucun contenant, dans le cas où vous avez procédé autrement.
+    > ⚠️ Un champ laissé vide (`HH`, `MM`, `SS`) sera interprété comme `00`.
+    """)
 
-        ### 3️⃣ Saisie des Pesées
-        * Sélectionnez le matériau et le contenant utilisé.
-        * **Erreur courante :** Si vous saisissez du texte à la place d'un chiffre pour le poids, une erreur rouge apparaîtra. 
-        * Utilisez le bouton `X` pour supprimer une ligne en cas d'erreur de saisie.
+        st.markdown("---")
 
-        ---
-        """)
-        st.success("✅ **Une fois fini :** Allez dans l'onglet 'Résumé' pour télécharger les données, et les sauvegarder en ligne.")
+        st.markdown("### 2️⃣ Contenants")
+        st.markdown("""
+    Les contenants sont les cartons ou bacs utilisés pour peser les matériaux. Leur poids à vide (tare) sera automatiquement soustrait pour obtenir le **poids net** du matériau.
+
+    **Comment faire :**
+    1. Donnez un nom clair à chaque contenant (ex : `Carton A`, `Bac Bleu 1`)
+    2. Pesez le contenant vide et saisissez son poids
+    3. Cliquez sur **Ajouter contenant**
+
+    > Si vous n'utilisez pas de contenant (pesée directe), laissez cet onglet vide — le poids brut sera alors considéré comme le poids net.
+    """)
+
+        st.markdown("---")
+
+        st.markdown("### 3️⃣ Résultats de pesée")
+        st.markdown("""
+    C'est ici que vous saisissez les pesées, **une classe de matériau à la fois**.
+
+    **Pour chaque pesée :**
+    1. Sélectionnez le ou les **numéro(s) d'échantillon** concernés
+    2. Sélectionnez la **classe de matériau**
+    3. Sélectionnez le **contenant utilisé** (si applicable)
+    4. Saisissez le ou les **poids bruts** en kg — séparez plusieurs valeurs par un espace (ex : `12.5 8.3`)
+    5. Cliquez sur ✅ **Ajouter la pesée**
+
+    **Erreurs courantes :**
+    - Poids saisi avec une virgule → utilisez un point (`12.5`) ou une virgule (`12,5`), les deux sont acceptés
+    - Mauvais contenant sélectionné → supprimez la ligne avec le bouton `✕` et recommencez
+    - Oubli d'échantillon → vous pouvez sélectionner plusieurs échantillons à la fois si la pesée est commune
+    """)
+
+        st.markdown("---")
+
+        st.markdown("### 4️⃣ Résumé")
+        st.markdown("""
+    Une fois toutes vos pesées saisies, l'onglet **Résumé** vous donne :
+    - Le tableau récapitulatif avec les masses nettes et pourcentages par classe
+    - Un graphique de répartition
+    - Un résumé par échantillon
+
+    Téléchargez ensuite le fichier Excel avec le bouton **⬇️ Télécharger** et sauvegardez-le dans le cloud avec **☁️ Sauvegarder dans le Cloud**.
+    """)
+        st.success("✅ Sauvegardez toujours localement **et** dans le cloud pour éviter toute perte de données.")
     # st.subheader("Métadonnées")
 
     with st.container(border=True):
@@ -636,15 +677,16 @@ with tab_weighing:
         if st.session_state["weighing_error"]:
             st.warning(st.session_state["weighing_error"])
         st.markdown("### Entrée de pesée")
-        col1, col2, col3, col4, col5 = st.columns(5, vertical_alignment="bottom")
 
+        # Row 1 — selection fields
+        col1, col2, col3 = st.columns(3, vertical_alignment="bottom")
         with col1:
             st.multiselect(
                 "Numéro(s) d'échantillon",
                 list(range(1, st.session_state["saved_nb_sample"] + 1)),
                 key="sample_nb",
                 placeholder="Choisir...",
-                disabled=disable_weighing
+                disabled=disable_weighing,
             )
         with col2:
             st.selectbox(
@@ -654,7 +696,7 @@ with tab_weighing:
                 index=None,
                 placeholder="Choisir...",
                 disabled=disable_weighing,
-                accept_new_options=True
+                accept_new_options=True,
             )
         with col3:
             st.selectbox(
@@ -665,26 +707,30 @@ with tab_weighing:
                 index=None,
                 placeholder="Choisir...",
             )
+
+        # Row 2 — weight input and submit
+        col4, col5 = st.columns([3, 1], vertical_alignment="bottom")
         with col4:
             weights_input = st.text_input(
                 "Poids brut (kg)",
                 key="gross_weight",
-                placeholder="Ex: 12.5 14.2",
-                disabled=disable_weighing
+                placeholder="Ex: 12.5 14.2 — séparez plusieurs pesées par un espace",
+                disabled=disable_weighing,
+            )
+        with col5:
+            disable_add_weight = not (st.session_state["sample_nb"] and st.session_state["material_class"])
+            st.button(
+                "✅ Ajouter la pesée",
+                on_click=add_weighing,
+                key="add_weighing_button",
+                use_container_width=True,
+                disabled=disable_add_weight,
             )
 
-
-        with col5:
-            disable_add_weight = True
-            if st.session_state["sample_nb"] and st.session_state["material_class"]:
-                disable_add_weight = False
-            st.button("✅ Ajouter la pesée", on_click=add_weighing, key="add_weighing_button", width='stretch', disabled=disable_add_weight)
-
-                    # Validation en direct (Point 2 précédent)
         if weights_input:
             if check_entry_typo(weights_input):
                 vals = [float(w.replace(",", ".")) for w in weights_input.split()]
-                st.caption(f"✅ {len(vals)} pesée(s). Total : **{sum(vals):.3f} kg**")
+                st.caption(f"✅ {len(vals)} pesée(s) détectée(s) — Total brut : **{sum(vals):.3f} kg**")
 
     # Affichage du tableau
     df_w = st.session_state["df_weighings"]
