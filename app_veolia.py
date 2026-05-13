@@ -500,7 +500,7 @@ st.title(f"Caractérisation — {FACILITY_NAME}")
 
 # ── TABS ──────────────────────────────────────────────────────────────────────
 tab_metadata, tab_containers, tab_weighing, tab_summary = st.tabs(
-    ["Métadonnées", "Contenants", "Résultats de pesée", "Résumé"]
+    ["1️⃣ Métadonnées", "2️⃣ Contenants", "3️⃣ Résultats de pesée", "4️⃣ Résumé"]
 )
 
 
