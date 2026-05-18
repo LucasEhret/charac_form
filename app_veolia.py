@@ -5,17 +5,18 @@ import matplotlib.pyplot as plt
 import io
 import dropbox
 import zipfile
+import json
 
 
 DEV_MODE = False
 
-
 MATERIALS_FILE = ".streamlit/ressources/list_classes.csv"
+SENSORS_FILE   = ".streamlit/ressources/list_sensors.csv"
+FACILITY_NAME  = "Veolia Bonneuil"
+# FACILITY_NAME = "TVL"
 
-SENSORS_FILE = ".streamlit/ressources/list_sensors.csv"
+BACKUP_FILENAME = f"backup_{FACILITY_NAME}.json"
 
-FACILITY_NAME = "Veolia Bonneuil"  # ← change this for each deployment
-# FACILITY_NAME = "TVL"  # ← change this for each deployment
 
 @st.cache_data
 def load_column_from_csv(csv_file: str) -> list[str]:
@@ -37,7 +38,8 @@ def load_column_from_csv(csv_file: str) -> list[str]:
 
 
 material_classes = load_column_from_csv(MATERIALS_FILE)
-sensor_list  = load_column_from_csv(SENSORS_FILE)
+sensor_list      = load_column_from_csv(SENSORS_FILE)
+
 
 # ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -46,39 +48,200 @@ st.set_page_config(
     layout="centered",
 )
 
+
 # ── SESSION STATE INIT ────────────────────────────────────────────────────────
 DEFAULTS = {
-    "container_error": "",
-    "weighing_error":  "",
+    "container_error":     "",
+    "weighing_error":      "",
     "saved_operator_name": "",
-    "saved_test_date":    dt.date.today(),
-    "saved_sensor_name":  "1",
-    "saved_nb_sample":    1,
-    "Image": pd.Series(dtype="object"),
-    "image_uploader_key": 0,
+    "saved_test_date":     dt.date.today(),
+    "saved_sensor_name":   sensor_list[0] if sensor_list else "",
+    "saved_nb_sample":     1,
+    "image_uploader_key":  0,
     "df_containers": pd.DataFrame({
-        "Contenant": pd.Series(dtype="str"),
-        "Poids à vide": pd.Series(dtype="float")
+        "Contenant":    pd.Series(dtype="str"),
+        "Poids à vide": pd.Series(dtype="float"),
     }),
     "df_collect_times": pd.DataFrame({
-        "Echantillon": pd.Series(dtype="int"),
-        "Date": pd.Series(dtype="object"),
+        "Echantillon":    pd.Series(dtype="int"),
+        "Date":           pd.Series(dtype="object"),
         "Heure de début": pd.Series(dtype="str"),
-        "Heure de fin": pd.Series(dtype="str")
+        "Heure de fin":   pd.Series(dtype="str"),
     }),
     "df_weighings": pd.DataFrame({
-        "N° échantillon": pd.Series(dtype="str"),
-        "Début":              pd.Series(dtype="object"), # ou "datetime64[ns]" si besoin
+        "N° échantillon":     pd.Series(dtype="str"),
+        "Début":              pd.Series(dtype="object"),
         "Fin":                pd.Series(dtype="object"),
         "Classe de matériau": pd.Series(dtype="str"),
         "Contenant utilisé":  pd.Series(dtype="str"),
         "Poids brut":         pd.Series(dtype="float"),
         "Poids net":          pd.Series(dtype="float"),
+        "Image":              pd.Series(dtype="object"),
     }),
 }
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
+
+
+# ── DROPBOX CLIENT ────────────────────────────────────────────────────────────
+def _get_dropbox_client():
+    return dropbox.Dropbox(
+        app_key=st.secrets["DROPBOX_APP_KEY"],
+        app_secret=st.secrets["DROPBOX_APP_SECRET"],
+        oauth2_refresh_token=st.secrets["DROPBOX_REFRESH_TOKEN"],
+    )
+
+
+def _dropbox_path(filename: str) -> str:
+    base = st.secrets.get("DROPBOX_DESTINATION_PATH", "/")
+    return f"{base}{filename}".replace("//", "/")
+
+
+# ── AUTO BACKUP ───────────────────────────────────────────────────────────────
+def auto_backup() -> None:
+    """Silently saves current session to Dropbox as a JSON file.
+    Called after every data-modifying action. Never blocks the user."""
+    if DEV_MODE:
+        return
+    try:
+        backup = {
+            "df_weighings": (
+                st.session_state["df_weighings"]
+                .drop(columns=["Image"], errors="ignore")
+                .to_json(orient="records")
+            ),
+            "df_containers": st.session_state["df_containers"].to_json(orient="records"),
+            "df_collect_times": (
+                st.session_state["df_collect_times"]
+                .astype({"Date": str}, errors="ignore")
+                .to_json(orient="records")
+            ),
+            "metadata": {
+                "operator":  st.session_state.get("saved_operator_name", ""),
+                "sensor":    st.session_state.get("saved_sensor_name", ""),
+                "nb_sample": st.session_state.get("saved_nb_sample", 1),
+                "date":      str(st.session_state.get("saved_test_date", dt.date.today())),
+            },
+        }
+        buf = io.BytesIO(json.dumps(backup, ensure_ascii=False).encode("utf-8"))
+        dbx = _get_dropbox_client()
+        dbx.files_upload(
+            buf.getvalue(),
+            _dropbox_path(BACKUP_FILENAME),
+            mode=dropbox.files.WriteMode.overwrite,
+        )
+    except Exception:
+        pass  # silent — backup is best-effort, never block the user
+
+
+# ── SESSION RESTORE ───────────────────────────────────────────────────────────
+def restore_from_dropbox() -> None:
+    """Downloads the backup JSON from Dropbox and restores session state."""
+    if DEV_MODE:
+        st.warning("DEV MODE — restauration Dropbox désactivée.")
+        return
+    try:
+        dbx  = _get_dropbox_client()
+        _, r = dbx.files_download(_dropbox_path(BACKUP_FILENAME))
+        data = json.loads(r.content.decode("utf-8"))
+    except dropbox.exceptions.ApiError:
+        st.warning("⚠️ Aucune sauvegarde trouvée sur Dropbox pour ce site.")
+        return
+    except Exception as e:
+        st.error(f"Erreur de connexion Dropbox : {e}")
+        return
+
+    try:
+        # ── df_weighings ──────────────────────────────────────────────────────
+        df_w = pd.read_json(io.StringIO(data["df_weighings"]))
+        if not df_w.empty:
+            for col, dtype in {
+                "N° échantillon": str,
+                "Poids brut": float,
+                "Poids net": float,
+            }.items():
+                if col in df_w.columns:
+                    df_w[col] = df_w[col].astype(dtype)
+            st.session_state["df_weighings"] = df_w
+        else:
+            st.session_state["df_weighings"] = DEFAULTS["df_weighings"].copy()
+
+        # ── df_containers ─────────────────────────────────────────────────────
+        df_c = pd.read_json(io.StringIO(data["df_containers"]))
+        if not df_c.empty:
+            for col, dtype in {"Contenant": str, "Poids à vide": float}.items():
+                if col in df_c.columns:
+                    df_c[col] = df_c[col].astype(dtype)
+            st.session_state["df_containers"] = df_c
+        else:
+            st.session_state["df_containers"] = DEFAULTS["df_containers"].copy()
+
+        # ── df_collect_times ──────────────────────────────────────────────────
+        df_t = pd.read_json(io.StringIO(data["df_collect_times"]))
+        if not df_t.empty:
+            for col, dtype in {
+                "Echantillon": int,
+                "Heure de début": str,
+                "Heure de fin": str,
+            }.items():
+                if col in df_t.columns:
+                    df_t[col] = df_t[col].astype(dtype)
+            if "Date" in df_t.columns:
+                df_t["Date"] = pd.to_datetime(df_t["Date"]).dt.date
+            st.session_state["df_collect_times"] = df_t
+        else:
+            st.session_state["df_collect_times"] = DEFAULTS["df_collect_times"].copy()
+
+        # ── metadata ──────────────────────────────────────────────────────────
+        meta = data["metadata"]
+        st.session_state["saved_operator_name"] = meta.get("operator", "")
+        st.session_state["saved_sensor_name"]   = meta.get("sensor", sensor_list[0])
+        st.session_state["saved_nb_sample"]     = int(meta.get("nb_sample", 1))
+        st.session_state["saved_test_date"]     = dt.date.fromisoformat(meta.get("date", str(dt.date.today())))
+
+        # Force widget state update
+        st.session_state["_operator_name"] = st.session_state["saved_operator_name"]
+        st.session_state["_sensor_name"]   = st.session_state["saved_sensor_name"]
+        st.session_state["_nb_sample"]     = st.session_state["saved_nb_sample"]
+
+        # Clear time widget keys so init_metadata_widget_state re-reads from df_collect_times
+        _clean_time_widget_keys(0)
+
+        st.success("✅ Session restaurée depuis Dropbox !")
+        st.rerun()
+
+    except Exception as e:
+        st.error(f"Erreur lors de la restauration : {e}")
+
+
+def delete_dropbox_backup() -> None:
+    if DEV_MODE:
+        st.toast("DEV MODE — suppression ignorée.")
+        return
+    try:
+        dbx = _get_dropbox_client()
+        dbx.files_delete_v2(_dropbox_path(BACKUP_FILENAME))
+        st.toast("Sauvegarde Dropbox supprimée.", icon="🗑️")
+    except dropbox.exceptions.ApiError:
+        st.toast("Aucune sauvegarde à supprimer.")
+    except Exception as e:
+        st.error(f"Erreur : {e}")
+
+
+# ── UPLOAD TO DROPBOX (final export) ─────────────────────────────────────────
+def upload_to_dropbox(buf, file_name: str) -> bool:
+    try:
+        dbx = _get_dropbox_client()
+        dbx.files_upload(
+            buf.getvalue(),
+            _dropbox_path(file_name),
+            mode=dropbox.files.WriteMode.overwrite,
+        )
+        return True
+    except Exception as e:
+        st.error(f"Erreur lors de l'envoi vers Dropbox : {e}")
+        return False
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -101,14 +264,9 @@ def get_sample_collect_times(sample_id: int):
     row = existing.loc[existing["Echantillon"] == sample_id]
     if row.empty:
         return None
-    
-    # On récupère la date de l'échantillon (ou la date globale par défaut)
     sample_date = row.iloc[0]["Date"] if "Date" in row.columns else st.session_state["saved_test_date"]
-    
     t_start = dt.time.fromisoformat(row.iloc[0]["Heure de début"])
     t_end   = dt.time.fromisoformat(row.iloc[0]["Heure de fin"])
-    
-    # On combine la date et l'heure pour l'export
     return {
         "Début": dt.datetime.combine(sample_date, t_start),
         "Fin":   dt.datetime.combine(sample_date, t_end),
@@ -129,8 +287,11 @@ def get_container_weight(container_name: str) -> float:
 def _clean_time_widget_keys(nb_sample: int) -> None:
     i = nb_sample + 1
     while f"_start_{i}_h" in st.session_state:
-        for key in (f"_start_{i}_h", f"_start_{i}_m", f"_start_{i}_s",
-                    f"_end_{i}_h",   f"_end_{i}_m",   f"_end_{i}_s"):
+        for key in (
+            f"_start_{i}_h", f"_start_{i}_m", f"_start_{i}_s",
+            f"_end_{i}_h",   f"_end_{i}_m",   f"_end_{i}_s",
+            f"_date_{i}",
+        ):
             st.session_state.pop(key, None)
         i += 1
 
@@ -150,22 +311,21 @@ def init_metadata_widget_state() -> None:
 
     for i in range(1, nb_sample + 1):
         if existing.empty or "Echantillon" not in existing.columns:
-            start, end = dt.time(0, 0, 0), dt.time(0, 0, 0)
+            start = end = dt.time(0, 0, 0)
             sample_date = st.session_state["saved_test_date"]
         else:
-            row   = existing.loc[existing["Echantillon"] == i]
+            row = existing.loc[existing["Echantillon"] == i]
             start = dt.time.fromisoformat(row.iloc[0]["Heure de début"]) if not row.empty else dt.time(0, 0, 0)
             end   = dt.time.fromisoformat(row.iloc[0]["Heure de fin"])   if not row.empty else dt.time(0, 0, 0)
             sample_date = row.iloc[0]["Date"] if (not row.empty and "Date" in row.columns) else st.session_state["saved_test_date"]
 
         for suffix, val in (
-            (f"_start_{i}_h", start.hour), (f"_start_{i}_m", start.minute), (f"_start_{i}_s", start.second),
-            (f"_end_{i}_h",   end.hour),   (f"_end_{i}_m",   end.minute),   (f"_end_{i}_s",   end.second),
+            (f"_start_{i}_h", start.hour),   (f"_start_{i}_m", start.minute), (f"_start_{i}_s", start.second),
+            (f"_end_{i}_h",   end.hour),     (f"_end_{i}_m",   end.minute),   (f"_end_{i}_s",   end.second),
         ):
             if suffix not in st.session_state:
                 st.session_state[suffix] = val
 
-                # Initialisation de la date spécifique
         if f"_date_{i}" not in st.session_state:
             st.session_state[f"_date_{i}"] = sample_date
 
@@ -174,33 +334,31 @@ def save_metadata() -> None:
     nb_sample = st.session_state["_nb_sample"]
     rows = []
     for i in range(1, nb_sample + 1):
-            s_date = st.session_state.get(f"_date_{i}") or st.session_state["_test_date"]
-            # On utilise .get() avec une valeur par défaut de 0 si le champ est None
-            h_s = st.session_state.get(f"_start_{i}_h") or 0
-            m_s = st.session_state.get(f"_start_{i}_m") or 0
-            s_s = st.session_state.get(f"_start_{i}_s") or 0
-            
-            h_e = st.session_state.get(f"_end_{i}_h") or 0
-            m_e = st.session_state.get(f"_end_{i}_m") or 0
-            s_e = st.session_state.get(f"_end_{i}_s") or 0
-            
-            rows.append({
-                "Echantillon": i,
-                "Date": s_date,
-                "Heure de début": f"{int(h_s):02d}:{int(m_s):02d}:{int(s_s):02d}",
-                "Heure de fin":   f"{int(h_e):02d}:{int(m_e):02d}:{int(s_e):02d}"
-            })
-    
-    st.session_state["df_collect_times"] = pd.DataFrame(rows)
-    st.session_state["saved_sensor_name"] = st.session_state["_sensor_name"]
-    st.session_state["saved_nb_sample"] = nb_sample
+        s_date = st.session_state.get(f"_date_{i}") or st.session_state["_test_date"]
+        h_s = st.session_state.get(f"_start_{i}_h") or 0
+        m_s = st.session_state.get(f"_start_{i}_m") or 0
+        s_s = st.session_state.get(f"_start_{i}_s") or 0
+        h_e = st.session_state.get(f"_end_{i}_h") or 0
+        m_e = st.session_state.get(f"_end_{i}_m") or 0
+        s_e = st.session_state.get(f"_end_{i}_s") or 0
+        rows.append({
+            "Echantillon":    i,
+            "Date":           s_date,
+            "Heure de début": f"{int(h_s):02d}:{int(m_s):02d}:{int(s_s):02d}",
+            "Heure de fin":   f"{int(h_e):02d}:{int(m_e):02d}:{int(s_e):02d}",
+        })
+
+    st.session_state["df_collect_times"]    = pd.DataFrame(rows)
     st.session_state["saved_operator_name"] = st.session_state["_operator_name"]
     st.session_state["saved_test_date"]     = st.session_state["_test_date"]
+    st.session_state["saved_sensor_name"]   = st.session_state["_sensor_name"]
+    st.session_state["saved_nb_sample"]     = nb_sample
+    _clean_time_widget_keys(nb_sample)
+    auto_backup()
 
 
 def add_container() -> None:
-    container_name   = st.session_state["container_name"].strip()
-    # On s'assure que le poids est bien un float
+    container_name = st.session_state["container_name"].strip()
     try:
         container_weight = float(st.session_state["container_weight"])
     except ValueError:
@@ -210,30 +368,26 @@ def add_container() -> None:
     if not container_name:
         st.session_state["container_error"] = "Veuillez renseigner un identifiant de contenant."
         return
-        
     if container_name in st.session_state["df_containers"]["Contenant"].tolist():
         st.session_state["container_error"] = "Ce contenant existe déjà."
         return
 
-    # Création du petit DataFrame à ajouter avec types explicites
     new_data = pd.DataFrame({
-        "Contenant": [container_name], 
-        "Poids à vide": [container_weight]
+        "Contenant":    [container_name],
+        "Poids à vide": [container_weight],
     }).astype({"Contenant": str, "Poids à vide": float})
 
-    # Concaténation
     if st.session_state["df_containers"].empty:
         st.session_state["df_containers"] = new_data
     else:
         st.session_state["df_containers"] = pd.concat(
-            [st.session_state["df_containers"], new_data],
-            ignore_index=True,
+            [st.session_state["df_containers"], new_data], ignore_index=True
         )
-    
-    # Nettoyage et rafraîchissement
+
     st.session_state["container_name"]   = ""
     st.session_state["container_weight"] = 0.0
-    st.session_state["container_error"] = ""
+    st.session_state["container_error"]  = ""
+    auto_backup()
 
 
 def remove_container(container_name: str) -> None:
@@ -242,14 +396,13 @@ def remove_container(container_name: str) -> None:
         .loc[st.session_state["df_containers"]["Contenant"] != container_name]
         .reset_index(drop=True)
     )
-    # Cascade: remove weighings that used this container
     st.session_state["df_weighings"] = (
         st.session_state["df_weighings"]
         .loc[st.session_state["df_weighings"]["Contenant utilisé"] != container_name]
         .reset_index(drop=True)
     )
     st.session_state["container_error"] = ""
-    st.rerun()
+    auto_backup()
 
 
 def add_weighing() -> None:
@@ -262,7 +415,7 @@ def add_weighing() -> None:
         )
         return
 
-    sample_ids = st.session_state["sample_nb"]
+    sample_ids     = st.session_state["sample_nb"]
     material_class = st.session_state["material_class"]
     container_used = st.session_state["container_used"]
 
@@ -272,18 +425,16 @@ def add_weighing() -> None:
     if material_class is None:
         st.session_state["weighing_error"] = "Veuillez choisir une classe de matériau."
         return
-    
 
-    new_rows = []
-    # replace the loop over sample_ids and new_rows building with:
     sample_label = ", ".join(map(str, sorted(sample_ids)))
-    times = get_sample_collect_times(sample_ids[0])
+    times        = get_sample_collect_times(sample_ids[0])
+    tare_weight  = get_container_weight(container_used)
+    weights      = [float(w.replace(",", ".")) for w in gross_weight_text.split()]
 
-    tare_weight = get_container_weight(container_used)
-    weights     = [float(w.replace(",", ".")) for w in gross_weight_text.split()]
+    img_key  = f"weighing_image_{st.session_state['image_uploader_key']}"
+    img_data = st.session_state[img_key].read() if st.session_state.get(img_key) else None
 
     new_rows = []
-    img_key = f"weighing_image_{st.session_state['image_uploader_key']}"
     for gross_weight in weights:
         net_weight = gross_weight - tare_weight
         if net_weight < 0:
@@ -300,29 +451,25 @@ def add_weighing() -> None:
             "Contenant utilisé":  container_used or "",
             "Poids brut":         gross_weight,
             "Poids net":          net_weight,
-            "Image":              st.session_state[img_key].read() if st.session_state.get(img_key) else None,
+            "Image":              img_data,
         })
 
-    new_df = pd.DataFrame(new_rows)
+    new_df = pd.DataFrame(new_rows).astype({"Poids brut": float, "Poids net": float})
 
-    new_df["Poids brut"] = new_df["Poids brut"].astype(float)
-    new_df["Poids net"] = new_df["Poids net"].astype(float)
-
-    st.toast("Pesée ajoutée !", icon="⚖️")
     if st.session_state["df_weighings"].empty:
         st.session_state["df_weighings"] = new_df
     else:
         st.session_state["df_weighings"] = pd.concat(
-            [st.session_state["df_weighings"], new_df],
-            ignore_index=True,
+            [st.session_state["df_weighings"], new_df], ignore_index=True
         )
 
-    # st.session_state["sample_nb"] = []
-    st.session_state["material_class"] = None
-    st.session_state["container_used"] = None
-    st.session_state["gross_weight"]   = ""
-    st.session_state["weighing_error"]  = ""
+    st.toast("Pesée ajoutée !", icon="⚖️")
+    st.session_state["material_class"]    = None
+    st.session_state["container_used"]    = None
+    st.session_state["gross_weight"]      = ""
+    st.session_state["weighing_error"]    = ""
     st.session_state["image_uploader_key"] += 1
+    auto_backup()
 
 
 def delete_weighing(idx: int) -> None:
@@ -332,9 +479,10 @@ def delete_weighing(idx: int) -> None:
         .reset_index(drop=True)
     )
     st.session_state["weighing_error"] = ""
-    st.rerun()
+    auto_backup()
 
 
+# ── SUMMARY & EXPORT ──────────────────────────────────────────────────────────
 def summarize_by_material(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(
@@ -359,13 +507,10 @@ def build_excel_export() -> io.BytesIO:
     sensor = st.session_state["saved_sensor_name"]
     date   = st.session_state["saved_test_date"]
 
-    # Aggregate: one row per sample × material class
     df_agg = (
         df.groupby(["N° échantillon", "Classe de matériau"], as_index=False)
         .agg(Début=("Début", "first"), Fin=("Fin", "first"), Poids_net=("Poids net", "sum"))
     )
-
-    # Per-sample totals (used in per-sample sheets)
     sample_totals = (
         df_agg.groupby("N° échantillon")["Poids_net"]
         .sum()
@@ -374,16 +519,14 @@ def build_excel_export() -> io.BytesIO:
     df_agg = df_agg.merge(sample_totals, left_on="N° échantillon", right_index=True, how="left")
     df_agg["% of sample total"] = df_agg["Poids_net"] / df_agg["Masse totale échantillon"] * 100
 
-    # Grand total (used in global sheet)
     grand_total = df_agg["Poids_net"].sum()
     df_agg["% of grand total"] = df_agg["Poids_net"] / grand_total * 100 if grand_total > 0 else 0.0
-
     df_agg["sensor name"] = sensor
     df_agg["date"]        = date
 
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
 
-        # ── Sheet 1: global summary ───────────────────────────────────────────
+        # Global sheet
         sheet1 = df_agg[[
             "sensor name", "date",
             "N° échantillon", "Début", "Fin",
@@ -395,32 +538,24 @@ def build_excel_export() -> io.BytesIO:
             "Classe de matériau": "Material class",
             "Poids_net":          "Net weight (kg)",
         })
-
-        total_row = pd.DataFrame([{
-            "sensor name":    sensor,
-            "date":           date,
-            "sample number":  "TOTAL",
-            "start time":     "",
-            "end time":       "",
-            "Material class": "",
-            "Net weight (kg)": grand_total,
-            "% of grand total": 100.0,
-        }])
-        sheet1 = pd.concat([sheet1, total_row], ignore_index=True)
+        sheet1 = pd.concat([sheet1, pd.DataFrame([{
+            "sensor name": sensor, "date": date,
+            "sample number": "TOTAL", "start time": "", "end time": "",
+            "Material class": "", "Net weight (kg)": grand_total, "% of grand total": 100.0,
+        }])], ignore_index=True)
         sheet1.to_excel(writer, sheet_name="Global results", index=False)
 
-        # ── One sheet per sample ──────────────────────────────────────────────
+        # Per-sample sheets
         for sample_id in sorted(df_agg["N° échantillon"].unique()):
-            df_s       = df_agg[df_agg["N° échantillon"] == sample_id].iloc[0]
-
             sample_id_list = [int(s.strip()) for s in str(sample_id).split(",")]
             time_rows = []
             for sid in sample_id_list:
                 times = get_sample_collect_times(sid)
-                if times:
-                    time_rows.append({"Echantillon": sid, "Début": str(times["Début"]), "Fin": str(times["Fin"])})
-                else:
-                    time_rows.append({"Echantillon": sid, "Début": "", "Fin": ""})
+                time_rows.append({
+                    "Echantillon": sid,
+                    "Début": str(times["Début"]) if times else "",
+                    "Fin":   str(times["Fin"])   if times else "",
+                })
             times_df = pd.DataFrame(time_rows)
 
             df_sample = (
@@ -433,104 +568,95 @@ def build_excel_export() -> io.BytesIO:
                 })
                 .copy()
             )
-
-            total_row_s = pd.DataFrame([{
-                "Material class":   "TOTAL",
-                "Net weight (kg)":  df_sample["Net weight (kg)"].sum(),
+            df_sample = pd.concat([df_sample, pd.DataFrame([{
+                "Material class": "TOTAL",
+                "Net weight (kg)": df_sample["Net weight (kg)"].sum(),
                 "% of sample total": 100.0,
-            }])
-            df_sample = pd.concat([df_sample, total_row_s], ignore_index=True)
+            }])], ignore_index=True)
 
             sheet_name = f"Sample {sample_id}"[:31]
             times_df.to_excel( writer, sheet_name=sheet_name, index=False, startrow=0)
             df_sample.to_excel(writer, sheet_name=sheet_name, index=False, startrow=len(times_df) + 2)
-        # ── Metadata sheet ────────────────────────────────────────────────────
-        df_weighings = st.session_state["df_weighings"]
+
+        # Metadata sheet
+        df_w = st.session_state["df_weighings"]
         pd.DataFrame([
-            {"field": "Operator name",       "value": st.session_state["saved_operator_name"]},
-            {"field": "Test date",           "value": str(st.session_state["saved_test_date"])},
-            {"field": "Sensor name",         "value": st.session_state["saved_sensor_name"]},
-            {"field": "Number of samples",   "value": st.session_state["saved_nb_sample"]},
-            {"field": "Number of weighings", "value": len(df_weighings)},
-            {"field": "Total net weight (kg)", "value": round(df_weighings["Poids net"].sum(), 4) if not df_weighings.empty else 0},
-            {"field": "Material classes used", "value": ", ".join(sorted(df_weighings["Classe de matériau"].unique())) if not df_weighings.empty else ""},
-            {"field": "Containers used",     "value": ", ".join(sorted(df_weighings["Contenant utilisé"].replace("", pd.NA).dropna().unique())) if not df_weighings.empty else ""},
-            {"field": "Export timestamp", "value": (dt.datetime.now(dt.timezone(dt.timedelta(hours=2))).strftime("%Y-%m-%d %H:%M:%S"))},
+            {"field": "Operator name",         "value": st.session_state["saved_operator_name"]},
+            {"field": "Test date",             "value": str(st.session_state["saved_test_date"])},
+            {"field": "Sensor name",           "value": st.session_state["saved_sensor_name"]},
+            {"field": "Number of samples",     "value": st.session_state["saved_nb_sample"]},
+            {"field": "Number of weighings",   "value": len(df_w)},
+            {"field": "Total net weight (kg)", "value": round(df_w["Poids net"].sum(), 4) if not df_w.empty else 0},
+            {"field": "Material classes used", "value": ", ".join(sorted(df_w["Classe de matériau"].unique())) if not df_w.empty else ""},
+            {"field": "Containers used",       "value": ", ".join(sorted(df_w["Contenant utilisé"].replace("", pd.NA).dropna().unique())) if not df_w.empty else ""},
+            {"field": "Export timestamp",      "value": dt.datetime.now(dt.timezone(dt.timedelta(hours=2))).strftime("%Y-%m-%d %H:%M:%S")},
         ]).to_excel(writer, sheet_name="Metadata", index=False)
+
     buf.seek(0)
     return buf
 
 
-def upload_to_dropbox(excel_buffer, file_name):
-    try:
-        # Initialisation avec Refresh Token pour une connexion permanente
-        dbx = dropbox.Dropbox(
-            app_key=st.secrets["DROPBOX_APP_KEY"],
-            app_secret=st.secrets["DROPBOX_APP_SECRET"],
-            oauth2_refresh_token=st.secrets["DROPBOX_REFRESH_TOKEN"]
-        )
-        
-        path = st.secrets.get("DROPBOX_DESTINATION_PATH", "/")
-        full_path = f"{path}{file_name}".replace("//", "/")
-        
-        dbx.files_upload(
-            excel_buffer.getvalue(), 
-            full_path, 
-            mode=dropbox.files.WriteMode.overwrite
-        )
-        return True
-    except Exception as e:
-        st.error(f"Erreur lors de l'envoi vers Dropbox : {e}")
-        return False
-    
+def build_zip_export() -> io.BytesIO:
+    buf         = io.BytesIO()
+    timestamp   = dt.datetime.now(dt.timezone(dt.timedelta(hours=2))).strftime("%Y%m%d_%H%M")
+    sensor_name = st.session_state["saved_sensor_name"].replace(" ", "_")
+    base_name   = f"Resultat_{FACILITY_NAME}_{sensor_name}_{timestamp}"
 
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        excel_buf = build_excel_export()
+        zf.writestr(f"{base_name}.xlsx", excel_buf.read())
+
+        df_w = st.session_state["df_weighings"]
+        if "Image" in df_w.columns:
+            seen_classes = set()
+            for _, row in df_w.iterrows():
+                if isinstance(row["Image"], bytes) and row["Classe de matériau"] not in seen_classes:
+                    seen_classes.add(row["Classe de matériau"])
+                    class_safe = row["Classe de matériau"].replace(" ", "_").replace("/", "-")
+                    zf.writestr(f"images/{class_safe}.jpg", row["Image"])
+
+    buf.seek(0)
+    return buf
+
+
+# ── WIDGETS ───────────────────────────────────────────────────────────────────
 def hms_widget(label, key_prefix, on_change_callback):
     st.write(label)
     cols = st.columns([1, 1, 1])
     with cols[0]:
         st.markdown("<center style='font-size:11px;color:grey'>HH</center>", unsafe_allow_html=True)
-        h = st.number_input("H", 0, 23, value=None, key=f"{key_prefix}_h", on_change=on_change_callback, label_visibility="collapsed")
+        h = st.number_input("H", 0, 23, value=None, key=f"{key_prefix}_h",
+                            on_change=on_change_callback, label_visibility="collapsed")
     with cols[1]:
         st.markdown("<center style='font-size:11px;color:grey'>MM</center>", unsafe_allow_html=True)
-        m = st.number_input("M", 0, 59, value=None, key=f"{key_prefix}_m", on_change=on_change_callback, label_visibility="collapsed")
+        m = st.number_input("M", 0, 59, value=None, key=f"{key_prefix}_m",
+                            on_change=on_change_callback, label_visibility="collapsed")
     with cols[2]:
         st.markdown("<center style='font-size:11px;color:grey'>SS</center>", unsafe_allow_html=True)
-        s = st.number_input("S", 0, 59, value=None, key=f"{key_prefix}_s", on_change=on_change_callback, label_visibility="collapsed")
-
+        s = st.number_input("S", 0, 59, value=None, key=f"{key_prefix}_s",
+                            on_change=on_change_callback, label_visibility="collapsed")
     if h is None or m is None or s is None:
         return None
     return dt.time(h, m, s)
 
 
-def build_zip_export() -> io.BytesIO:
-    buf = io.BytesIO()
-    timestamp  = dt.datetime.now(dt.timezone(dt.timedelta(hours=2))).strftime("%Y%m%d_%H%M")
-    sensor_name = st.session_state["saved_sensor_name"].replace(" ", "_")
-    base_name  = f"Resultat_{FACILITY_NAME}_{sensor_name}_{timestamp}"
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.subheader("🛠️ Récupération de session")
+    st.info(
+        "Si l'application a redémarré et que vous avez perdu vos données, "
+        "cliquez ci-dessous pour restaurer votre dernière session depuis Dropbox."
+    )
+    if st.button("🔄 Restaurer la session", use_container_width=True):
+        restore_from_dropbox()
 
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+    if st.button("🗑️ Effacer la sauvegarde", type="secondary", use_container_width=True):
+        delete_dropbox_backup()
 
-        # Excel file
-        excel_buf = build_excel_export()
-        zf.writestr(f"{base_name}.xlsx", excel_buf.read())
 
-        # Images — one per material class (first image found)
-        df_w = st.session_state["df_weighings"]
-        if "Image" in df_w.columns:
-            seen_classes = set()
-            for idx, row in df_w.iterrows():
-                if isinstance(row["Image"], bytes) and row["Classe de matériau"] not in seen_classes:
-                    seen_classes.add(row["Classe de matériau"])
-                    class_safe = row["Classe de matériau"].replace(" ", "_").replace("/", "-")
-                    img_name = f"images/{class_safe}.jpg"
-                    zf.writestr(img_name, row["Image"])
-
-    buf.seek(0)
-    return buf
-# ── TITLE ─────────────────────────────────────────────────────────────────────
+# ── TITLE & TABS ──────────────────────────────────────────────────────────────
 st.title(f"Caractérisation — {FACILITY_NAME}")
 
-# ── TABS ──────────────────────────────────────────────────────────────────────
 tab_metadata, tab_containers, tab_weighing, tab_summary = st.tabs(
     ["1️⃣ Métadonnées", "2️⃣ Contenants", "3️⃣ Résultats de pesée", "4️⃣ Résumé"]
 )
@@ -539,78 +665,68 @@ tab_metadata, tab_containers, tab_weighing, tab_summary = st.tabs(
 # ── TAB 1 : METADATA ──────────────────────────────────────────────────────────
 with tab_metadata:
     init_metadata_widget_state()
+
     with st.expander("📖 Guide d'utilisation", expanded=False):
         st.image(".streamlit/images/process carac.png", width='stretch')
-
         st.markdown("## Comment utiliser ce formulaire ?")
         st.info("💡 Suivez les 4 onglets dans l'ordre. Les données sont sauvegardées automatiquement à chaque saisie — vous ne pouvez pas perdre ce que vous avez entré.")
-
         st.markdown("---")
-
         st.markdown("### 1️⃣ Métadonnées — *cet onglet*")
         st.markdown("""
-    Renseignez les informations générales du test **avant de commencer à peser**.
+Renseignez les informations générales du test **avant de commencer à peser**.
 
-    | Champ | Quoi saisir |
-    |---|---|
-    | **Nom** | Votre prénom et nom |
-    | **Date du jour** | La date du test (pré-remplie automatiquement) |
-    | **Nom du capteur** | Le capteur WasteFlow associé à ce test |
-    | **Nombre d'échantillons** | Le nombre de prélèvements effectués |
+| Champ | Quoi saisir |
+|---|---|
+| **Nom** | Votre prénom et nom |
+| **Date du jour** | La date du test (pré-remplie automatiquement) |
+| **Nom du capteur** | Le capteur WasteFlow associé à ce test |
+| **Nombre d'échantillons** | Le nombre de prélèvements effectués |
 
-    Pour chaque échantillon, saisissez :
-    - **La date du prélèvement** (si différente de la date du jour)
-    - **L'heure de début et de fin** du prélèvement (HH / MM / SS)
+Pour chaque échantillon, saisissez :
+- **La date du prélèvement** (si différente de la date du jour)
+- **L'heure de début et de fin** du prélèvement (HH / MM / SS)
 
-    > ⚠️ Un champ laissé vide (`HH`, `MM`, `SS`) sera interprété comme `00`.
-    """)
-
+> ⚠️ Un champ laissé vide (`HH`, `MM`, `SS`) sera interprété comme `00`.
+""")
         st.markdown("---")
-
         st.markdown("### 2️⃣ Contenants")
         st.markdown("""
-    Les contenants sont les cartons ou bacs utilisés pour peser les matériaux. Leur poids à vide (tare) sera automatiquement soustrait pour obtenir le **poids net** du matériau.
+Les contenants sont les cartons ou bacs utilisés pour peser les matériaux. Leur poids à vide (tare) sera automatiquement soustrait pour obtenir le **poids net** du matériau.
 
-    **Comment faire :**
-    1. Donnez un nom clair à chaque contenant (ex : `Carton A`, `Bac Bleu 1`)
-    2. Pesez le contenant vide et saisissez son poids
-    3. Cliquez sur **Ajouter contenant**
+**Comment faire :**
+1. Donnez un nom clair à chaque contenant (ex : `Carton A`, `Bac Bleu 1`)
+2. Pesez le contenant vide et saisissez son poids
+3. Cliquez sur **Ajouter contenant**
 
-    > Si vous n'utilisez pas de contenant (pesée directe), laissez cet onglet vide — le poids brut sera alors considéré comme le poids net.
-    """)
-
+> Si vous n'utilisez pas de contenant (pesée directe), laissez cet onglet vide — le poids brut sera alors considéré comme le poids net.
+""")
         st.markdown("---")
-
         st.markdown("### 3️⃣ Résultats de pesée")
         st.markdown("""
-    C'est ici que vous saisissez les pesées, **une classe de matériau à la fois**.
+C'est ici que vous saisissez les pesées, **une classe de matériau à la fois**.
 
-    **Pour chaque pesée :**
-    1. Sélectionnez le ou les **numéro(s) d'échantillon** concernés
-    2. Sélectionnez la **classe de matériau**
-    3. Sélectionnez le **contenant utilisé** (si applicable)
-    4. Saisissez le ou les **poids bruts** en kg — séparez plusieurs valeurs par un espace (ex : `12.5 8.3`)
-    5. Cliquez sur ✅ **Ajouter la pesée**
+**Pour chaque pesée :**
+1. Sélectionnez le ou les **numéro(s) d'échantillon** concernés
+2. Sélectionnez la **classe de matériau**
+3. Sélectionnez le **contenant utilisé** (si applicable)
+4. Saisissez le ou les **poids bruts** en kg — séparez plusieurs valeurs par un espace (ex : `12.5 8.3`)
+5. Cliquez sur ✅ **Ajouter la pesée**
 
-    **Erreurs courantes :**
-    - Poids saisi avec une virgule → utilisez un point (`12.5`) ou une virgule (`12,5`), les deux sont acceptés
-    - Mauvais contenant sélectionné → supprimez la ligne avec le bouton `✕` et recommencez
-    - Oubli d'échantillon → vous pouvez sélectionner plusieurs échantillons à la fois si la pesée est commune
-    """)
-
+**Erreurs courantes :**
+- Mauvais contenant sélectionné → supprimez la ligne avec le bouton `✕` et recommencez
+- Oubli d'échantillon → vous pouvez sélectionner plusieurs échantillons à la fois si la pesée est commune
+""")
         st.markdown("---")
-
         st.markdown("### 4️⃣ Résumé")
         st.markdown("""
-    Une fois toutes vos pesées saisies, l'onglet **Résumé** vous donne :
-    - Le tableau récapitulatif avec les masses nettes et pourcentages par classe
-    - Un graphique de répartition
-    - Un résumé par échantillon
+Une fois toutes vos pesées saisies, l'onglet **Résumé** vous donne :
+- Le tableau récapitulatif avec les masses nettes et pourcentages par classe
+- Un graphique de répartition
+- Un résumé par échantillon
 
-    Téléchargez ensuite le fichier Excel avec le bouton **⬇️ Télécharger** et sauvegardez-le dans le cloud avec **☁️ Sauvegarder dans le Cloud**.
-    """)
+Téléchargez ensuite le fichier avec le bouton **⬇️ Télécharger** et sauvegardez-le dans le cloud avec **☁️ Sauvegarder dans le Cloud**.
+""")
         st.success("✅ Sauvegardez toujours localement **et** dans le cloud pour éviter toute perte de données.")
-    # st.subheader("Métadonnées")
 
     with st.container(border=True):
         st.markdown("### Informations spécifiques au test")
@@ -625,26 +741,15 @@ with tab_metadata:
                 key="_nb_sample",
             )
 
-        # Dans tab_metadata, remplacez la boucle for par celle-ci :
         for i in range(1, int(st.session_state["_nb_sample"]) + 1):
             st.divider()
             st.subheader(f"Prélèvement de l'échantillon {i}")
-            
-            # Nouveau widget de date par échantillon
             st.date_input("Date du prélèvement", key=f"_date_{i}", on_change=save_metadata)
-            
             col_start, col_end = st.columns(2)
             with col_start:
                 hms_widget("Heure de début", f"_start_{i}", save_metadata)
             with col_end:
                 hms_widget("Heure de fin", f"_end_{i}", save_metadata)
-
-        st.space()
-        # st.button(
-        #     "💾 Enregistrer les métadonnées",
-        #     on_click=save_metadata,
-        #     key="save_metadata_button",
-        # )
 
     st.dataframe(st.session_state["df_collect_times"], hide_index=True)
 
@@ -677,14 +782,13 @@ with tab_containers:
         with col3:
             st.button(
                 "✅ Ajouter contenant",
-                width='stretch',
+                use_container_width=True,
                 on_click=add_container,
                 key="add_container_button",
             )
 
-
     if st.session_state["df_containers"].empty:
-            st.info("Aucun contenant enregistré.")
+        st.info("Aucun contenant enregistré.")
     else:
         c1, c2, c3 = st.columns(3)
         c1.markdown("**Nom du contenant**")
@@ -693,24 +797,23 @@ with tab_containers:
             c1, c2, c3 = st.columns([3, 2, 1])
             c1.write(row["Contenant"])
             c2.write(f"{row['Poids à vide']:.3f} kg")
-            # Suppression du st.rerun() ici aussi
             if c3.button("Supprimer", key=f"del_{row['Contenant']}"):
                 remove_container(row["Contenant"])
+                st.rerun()
 
 
 # ── TAB 3 : WEIGHING ──────────────────────────────────────────────────────────
 with tab_weighing:
     st.subheader("Résultats de pesée")
-    disable_weighing = False
-    if st.session_state["df_collect_times"].empty:
-        disable_weighing = True
+    disable_weighing = st.session_state["df_collect_times"].empty
+    if disable_weighing:
         st.warning("⚠️ Renseignez d'abord les heures de prélèvement dans l'onglet **Métadonnées**.")
+
     with st.container(border=True):
         if st.session_state["weighing_error"]:
             st.warning(st.session_state["weighing_error"])
         st.markdown("### Entrée de pesée")
 
-        # Row 1 — selection fields
         col1, col2, col3 = st.columns(3, vertical_alignment="bottom")
         with col1:
             st.multiselect(
@@ -739,7 +842,7 @@ with tab_weighing:
                 index=None,
                 placeholder="Choisir...",
             )
-        # Optional image
+
         img_file = st.file_uploader(
             "Photo du matériau (optionnel)",
             type=["jpg", "jpeg", "png"],
@@ -747,7 +850,7 @@ with tab_weighing:
         )
         if img_file:
             st.image(img_file, width=200)
-        # Row 2 — weight input and submit
+
         col4, col5 = st.columns([3, 1], vertical_alignment="bottom")
         with col4:
             weights_input = st.text_input(
@@ -757,7 +860,9 @@ with tab_weighing:
                 disabled=disable_weighing,
             )
         with col5:
-            disable_add_weight = not (st.session_state["sample_nb"] and st.session_state["material_class"])
+            disable_add_weight = not (
+                st.session_state["sample_nb"] and st.session_state["material_class"]
+            )
             st.button(
                 "✅ Ajouter la pesée",
                 on_click=add_weighing,
@@ -766,45 +871,66 @@ with tab_weighing:
                 disabled=disable_add_weight,
             )
 
+        if weights_input and check_entry_typo(weights_input):
+            vals = [float(w.replace(",", ".")) for w in weights_input.split()]
+            st.caption(f"✅ {len(vals)} pesée(s) détectée(s) — Total brut : **{sum(vals):.3f} kg**")
 
-        if weights_input:
-            if check_entry_typo(weights_input):
-                vals = [float(w.replace(",", ".")) for w in weights_input.split()]
-                st.caption(f"✅ {len(vals)} pesée(s) détectée(s) — Total brut : **{sum(vals):.3f} kg**")
-
-    # Affichage du tableau
     df_w = st.session_state["df_weighings"]
     if df_w.empty:
         st.info("Aucune pesée enregistrée.")
     else:
         h_cols = st.columns([1, 2, 2, 1.5, 1.5, 1])
-        labels = ["#échant.", "Classe", "Contenant", "Brut (kg)", "Net (kg)", ""]
-        for col, label in zip(h_cols, labels):
+        for col, label in zip(h_cols, ["#échant.", "Classe", "Contenant", "Brut (kg)", "Net (kg)", ""]):
             col.markdown(f"**{label}**")
-            
         for idx, row in df_w.iterrows():
             r = st.columns([1, 2, 2, 1.5, 1.5, 1])
             r[0].write(row["N° échantillon"])
-            # r[1].write(str(row["Début"]))
-            # r[2].write(str(row["Fin"]))
             r[1].write(row["Classe de matériau"])
             r[2].write(row["Contenant utilisé"])
             r[3].write(f"{row['Poids brut']:.3f}")
             r[4].write(f"{row['Poids net']:.3f}")
-            # Suppression sans st.rerun()
             if r[5].button("✕", key=f"del_w_{idx}"):
                 delete_weighing(idx)
-    # weighing_section() 
+                st.rerun()
 
 
 # ── TAB 4 : SUMMARY ───────────────────────────────────────────────────────────
 with tab_summary:
+    df_summary_by_material = summarize_by_material(st.session_state["df_weighings"])
+    total_net_mass = df_summary_by_material["Poids net"].sum() if not df_summary_by_material.empty else 0.0
+
+    st.write(f"### Résumé global — masse totale : {total_net_mass:.2f} kg")
+    st.dataframe(df_summary_by_material, hide_index=True)
+
+    with st.container(border=True):
+        if not df_summary_by_material.empty and total_net_mass > 0:
+            fig, ax = plt.subplots()
+            ax.pie(
+                df_summary_by_material["Pourcentage de la masse totale"],
+                labels=df_summary_by_material["Classe de matériau"],
+                autopct="%1.1f%%",
+            )
+            ax.set_title("Répartition par classe de matériau")
+            st.pyplot(fig)
+            plt.close(fig)
+        else:
+            st.info("Aucune pesée enregistrée — le graphique s'affichera ici.")
+
+    st.markdown("### Résumé par échantillon")
+    for sample_id in sorted(st.session_state["df_weighings"]["N° échantillon"].dropna().unique()):
+        df_sample         = st.session_state["df_weighings"][st.session_state["df_weighings"]["N° échantillon"] == sample_id]
+        df_sample_summary = summarize_by_material(df_sample)
+        total_sample_net  = df_sample_summary["Poids net"].sum() if not df_sample_summary.empty else 0.0
+        st.markdown(f"#### Échantillon {sample_id} — masse totale : {total_sample_net:.2f} kg")
+        st.dataframe(df_sample_summary, hide_index=True)
+        st.divider()
+
     if not st.session_state["df_weighings"].empty:
         timestamp   = dt.datetime.now(dt.timezone(dt.timedelta(hours=2))).strftime("%Y%m%d_%H%M")
         sensor_name = st.session_state["saved_sensor_name"].replace(" ", "_")
         base_name   = f"Resultat_{FACILITY_NAME}_{sensor_name}_{timestamp}"
+        zip_data    = build_zip_export()
 
-        zip_data = build_zip_export()
         with st.container(border=True):
             st.subheader("Sauvegarde")
             col1, col2 = st.columns(2)
@@ -828,41 +954,3 @@ with tab_summary:
                     st.info("DEV MODE — Dropbox upload désactivé.")
     else:
         st.info("Aucune pesée enregistrée — l'export sera disponible ici.")
-    # st.subheader("Résumé de la caractérisation")
-
-    df_summary_by_material = summarize_by_material(st.session_state["df_weighings"])
-    total_net_mass = df_summary_by_material["Poids net"].sum() if not df_summary_by_material.empty else 0.0
-
-    st.write(f"### Résumé global — masse totale : {total_net_mass:.2f} kg")
-    st.dataframe(df_summary_by_material, hide_index=True)
-
-    with st.container(border=True):
-        if not df_summary_by_material.empty and total_net_mass > 0:
-            fig, ax = plt.subplots()
-            ax.pie(
-                df_summary_by_material["Pourcentage de la masse totale"],
-                labels=df_summary_by_material["Classe de matériau"],
-                autopct="%1.1f%%",
-            )
-            ax.set_title("Répartition par classe de matériau")
-            st.pyplot(fig)
-            plt.close(fig)
-        else:
-            st.info("Aucune pesée enregistrée — le graphique s'affichera ici.")
-
-    # st.divider()
-    st.markdown("### Résumé par échantillon")
-
-    sample_ids = sorted(
-        st.session_state["df_weighings"]["N° échantillon"].dropna().unique()
-    )
-    for sample_id in sample_ids:
-        df_sample = st.session_state["df_weighings"][
-            st.session_state["df_weighings"]["N° échantillon"] == sample_id
-        ]
-        df_sample_summary = summarize_by_material(df_sample)
-        total_sample_net  = df_sample_summary["Poids net"].sum() if not df_sample_summary.empty else 0.0
-        st.markdown(f"#### Échantillon {sample_id} — masse totale : {total_sample_net:.2f} kg")
-        st.dataframe(df_sample_summary, hide_index=True)
-        st.divider()
-
