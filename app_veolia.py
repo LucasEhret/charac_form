@@ -9,7 +9,6 @@ import json
 import uuid
 from pathlib import Path
 from streamlit_extras.card_selector import card_selector
-
 import tempfile
 TEMP_DIR = Path(tempfile.gettempdir()) / "wastechar_sessions"
 TEMP_DIR.mkdir(exist_ok=True)
@@ -55,6 +54,7 @@ st.set_page_config(
 
 # ── SESSION STATE INIT ────────────────────────────────────────────────────────
 DEFAULTS = {
+    "metadata_error": "",
     "container_error": "",
     "weighing_error":  "",
     "saved_operator_name": "",
@@ -64,6 +64,8 @@ DEFAULTS = {
     "Image": pd.Series(dtype="object"),
     "image_uploader_key": 0,
     "saved_workflow" : 0,
+    "saved_workflow_order": 0,
+    "metadata_error": "",
     "df_containers": pd.DataFrame({
         "Contenant": pd.Series(dtype="str"),
         "Poids à vide": pd.Series(dtype="float")
@@ -111,6 +113,7 @@ def save_session() -> None:
             ),
             "metadata": {
                 "workflow": st.session_state.get("saved_workflow", 0),
+                "workflow_order": st.session_state.get("saved_workflow_order", 0),
                 "operator":  st.session_state.get("saved_operator_name", ""),
                 "sensor":    st.session_state.get("saved_sensor_name", ""),
                 "nb_sample": st.session_state.get("saved_nb_sample", 1),
@@ -165,10 +168,15 @@ def restore_session() -> None:
         st.session_state["saved_sensor_name"]   = meta.get("sensor", sensor_list[0])
         st.session_state["saved_nb_sample"]     = int(meta.get("nb_sample", 1))
         wf = meta.get("workflow", 0)
+        wfo = meta.get("workflow_order", 0)
         if isinstance(wf, str):
-            _wf_titles = ["Standard", "Closed loop", "Split samples"]
+            _wf_titles = ["Standard", "Closed loop", "Multi-échantillon"]
             wf = _wf_titles.index(wf) if wf in _wf_titles else 0
         st.session_state["saved_workflow"] = wf
+        if isinstance(wfo, str):
+            _wfo_titles = ["A", "B"]
+            wfo = _wfo_titles.index(wfo) if wfo in _wfo_titles else 0
+        st.session_state["saved_workflow_order"] = wfo
         st.session_state["saved_test_date"]     = dt.date.fromisoformat(
             meta.get("date", str(dt.date.today()))
         )
@@ -178,6 +186,7 @@ def restore_session() -> None:
         st.session_state.pop("_nb_sample", None)
         st.session_state.pop("_test_date", None)
         st.session_state.pop("workflow_type", None)
+        st.session_state.pop("workflow_order", None)
     except Exception:
         pass  # corrupt file — start fresh silently
 
@@ -244,15 +253,6 @@ def get_container_weight(container_name: str) -> float:
     return float(row.iloc[0]["Poids à vide"])
 
 
-# def _clean_time_widget_keys(nb_sample: int) -> None:
-#     i = nb_sample + 1
-#     while f"_start_{i}_h" in st.session_state:
-#         for key in (f"_start_{i}_h", f"_start_{i}_m", f"_start_{i}_s",
-#                     f"_end_{i}_h",   f"_end_{i}_m",   f"_end_{i}_s"):
-#             st.session_state.pop(key, None)
-#         i += 1
-
-
 def init_metadata_widget_state() -> None:
     if "_operator_name" not in st.session_state:
         st.session_state["_operator_name"] = st.session_state["saved_operator_name"]
@@ -292,28 +292,38 @@ def save_metadata() -> None:
     nb_sample = st.session_state["_nb_sample"]
     rows = []
     for i in range(1, nb_sample + 1):
-            s_date = st.session_state.get(f"_date_{i}") or st.session_state["_test_date"]
-            # On utilise .get() avec une valeur par défaut de 0 si le champ est None
-            h_s = st.session_state.get(f"_start_{i}_h") or 0
-            m_s = st.session_state.get(f"_start_{i}_m") or 0
-            s_s = st.session_state.get(f"_start_{i}_s") or 0
-            
-            h_e = st.session_state.get(f"_end_{i}_h") or 0
-            m_e = st.session_state.get(f"_end_{i}_m") or 0
-            s_e = st.session_state.get(f"_end_{i}_s") or 0
-            
-            rows.append({
-                "Echantillon": i,
-                "Date": s_date,
-                "Heure de début": f"{int(h_s):02d}:{int(m_s):02d}:{int(s_s):02d}",
-                "Heure de fin":   f"{int(h_e):02d}:{int(m_e):02d}:{int(s_e):02d}"
-            })
+        s_date = st.session_state.get(f"_date_{i}") or st.session_state["_test_date"]
+        # On utilise .get() avec une valeur par défaut de 0 si le champ est None
+        h_s = st.session_state.get(f"_start_{i}_h") or 0
+        m_s = st.session_state.get(f"_start_{i}_m") or 0
+        s_s = st.session_state.get(f"_start_{i}_s") or 0
+        
+        h_e = st.session_state.get(f"_end_{i}_h") or 0
+        m_e = st.session_state.get(f"_end_{i}_m") or 0
+        s_e = st.session_state.get(f"_end_{i}_s") or 0
+        
+        rows.append({
+            "Echantillon": i,
+            "Date": s_date,
+            "Heure de début": f"{int(h_s):02d}:{int(m_s):02d}:{int(s_s):02d}",
+            "Heure de fin":   f"{int(h_e):02d}:{int(m_e):02d}:{int(s_e):02d}"
+        })
+    for row in rows:
+        if row["Heure de début"] == "00:00:00" and row["Heure de fin"] == "00:00:00":
+            continue
+        if row["Heure de fin"] <= row["Heure de début"]:
+            st.session_state["metadata_error"] = (
+                f"Échantillon {row['Echantillon']} : "
+                "l'heure de fin doit être postérieure à l'heure de début."
+            )
+            return
     
     st.session_state["df_collect_times"] = pd.DataFrame(rows)
     st.session_state["saved_sensor_name"] = st.session_state["_sensor_name"]
     st.session_state["saved_nb_sample"] = nb_sample
     st.session_state["saved_operator_name"] = st.session_state["_operator_name"]
     st.session_state["saved_test_date"]     = st.session_state["_test_date"]
+    st.session_state["metadata_error"] = ""
     save_session()
 
 
@@ -569,10 +579,16 @@ def build_excel_export() -> io.BytesIO:
             df_sample.to_excel(writer, sheet_name=sheet_name, index=False, startrow=len(times_df) + 2)
         # ── Metadata sheet ────────────────────────────────────────────────────
         df_weighings = st.session_state["df_weighings"]
+        _wf_titles  = ["Standard", "Multi-échantillon"]
+        _wfo_titles = ["A", "B"]
+        _wf_idx  = st.session_state.get("saved_workflow", 0)
+        _wfo_idx = st.session_state.get("saved_workflow_order", 0)
         pd.DataFrame([
             {"field": "Operator name",       "value": st.session_state["saved_operator_name"]},
             {"field": "Test date",           "value": str(st.session_state["saved_test_date"])},
             {"field": "Sensor name",         "value": st.session_state["saved_sensor_name"]},
+            {"field": "Workflow",            "value": _wf_titles[_wf_idx] if isinstance(_wf_idx, int) else "—"},
+            {"field": "Workflow order",      "value": _wfo_titles[_wfo_idx] if isinstance(_wfo_idx, int) else "—"},
             {"field": "Number of samples",   "value": st.session_state["saved_nb_sample"]},
             {"field": "Number of weighings", "value": len(df_weighings)},
             {"field": "Total net weight (kg)", "value": round(df_weighings["Poids net"].sum(), 4) if not df_weighings.empty else 0},
@@ -641,7 +657,7 @@ def build_zip_export() -> io.BytesIO:
         df_w = st.session_state["df_weighings"]
         if "Image" in df_w.columns:
             seen_classes = set()
-            for idx, row in df_w.iterrows():
+            for _, row in df_w.iterrows():
                 if isinstance(row["Image"], bytes) and row["Classe de matériau"] not in seen_classes:
                     seen_classes.add(row["Classe de matériau"])
                     class_safe = row["Classe de matériau"].replace(" ", "_").replace("/", "-")
@@ -658,10 +674,12 @@ with st.sidebar:
     # ── Session info ──────────────────────────────────────────────────────────
     st.markdown(f"**{FACILITY_NAME}**")
     st.caption(
-        f"🧑 {st.session_state.get('saved_operator_name') or 'Opérateur non renseigné'}  \n"
-        f"📅 {st.session_state.get('saved_test_date') or '—'}  \n"
-        f"📡 {st.session_state.get('saved_sensor_name') or '—'}  \n"
-        f"⚖️ {len(st.session_state['df_weighings'])} pesée(s) enregistrée(s)"
+        f"Opérateur :  {st.session_state.get('saved_operator_name') or 'Opérateur non renseigné'}  \n"
+        f"Date : {st.session_state.get('saved_test_date') or '—'}  \n"
+        f"Capteur testé : {st.session_state.get('saved_sensor_name') or '—'}  \n"
+        f"Ordre de passage : {['A', 'B'][st.session_state['saved_workflow_order']] if isinstance(st.session_state.get('saved_workflow_order'), int) else '—'}  \n"
+        f"Workflow : {['Standard', 'Multi-échantillon'][st.session_state['saved_workflow']] if isinstance(st.session_state.get('saved_workflow'), int) else '—'}  \n"
+        f"Nombre de pesées :  {len(st.session_state['df_weighings'])}"
     )
 
     st.divider()
@@ -731,10 +749,10 @@ tab_metadata, tab_containers, tab_weighing, tab_summary = st.tabs(
     ["1️⃣ Métadonnées", "2️⃣ Contenants", "3️⃣ Résultats de pesée", "4️⃣ Résumé"]
 )
 
-
 # ── TAB 1 : METADATA ──────────────────────────────────────────────────────────
 with tab_metadata:
     init_metadata_widget_state()
+
     with st.expander("⁉️ Guide d'utilisation", expanded=False):
         st.image(".streamlit/images/process carac.png", width='stretch')
 
@@ -808,14 +826,21 @@ with tab_metadata:
     # st.subheader("Métadonnées")
 
     with st.container(border=True):
-        
-        
         st.subheader("Type de workflow")
+        workflow_order = card_selector(
+            [
+                dict(title="A", description="Capteur ➡️ Collecte ➡️ Pesée"),
+                dict(title="B", description="Collecte ➡️ Pesée ➡️ Capteur WasteFlow")
+            ], # type: ignore
+            selection_mode="single",
+            default=st.session_state.get("saved_workflow_order", 0),
+            key="workflow_order"
+        )
         workflow = card_selector(
             [
-                dict(title="Standard", icon="📦", description="Capteur Wasteflow -> Récolte échantillon -> Pesée"),
-                dict(title="Closed loop", icon="🔄", description="Les matériaux sont réintroduits dans le process"),
-                dict(title="Split samples", icon="✂️", description="Plusieurs récoltes d'échantillon à des heures différentes, ensuite mélangées en une seule pesée"),
+                dict(title="Standard", icon="📦", description="1 pesée et 1 collecte d'échantillon"),
+                # dict(title="Closed loop", icon="🔄", description="Les matériaux sont réintroduits dans le process"),
+                dict(title="Multi-échantillon", icon="✂️", description="1 pesée et plusieurs collectes d'échantillons"),
             ], # type: ignore
             selection_mode="single",
             default=st.session_state.get("saved_workflow", 0),
@@ -823,18 +848,29 @@ with tab_metadata:
         ) # type: ignore
         st.space()
         st.markdown("### Informations spécifiques au test")
+        _prev_wf  = st.session_state.get("saved_workflow")
+        _prev_wfo = st.session_state.get("saved_workflow_order")
         st.session_state["saved_workflow"] = workflow
+        st.session_state["saved_workflow_order"] = workflow_order
+        if workflow != _prev_wf or workflow_order != _prev_wfo:
+            save_metadata()
         r1c1, r1c2, r1c3, r1c4 = st.columns(4)
         with r1c1: st.text_input("Nom", placeholder="Entrez votre nom", key="_operator_name", on_change=save_metadata)
         with r1c2: st.date_input("Date du jour", key="_test_date", on_change=save_metadata)
         with r1c3: st.selectbox("Nom du capteur", sensor_list, key="_sensor_name", index=0, on_change=save_metadata)
         with r1c4:
+            _is_standard = st.session_state.get("saved_workflow", 0) == 0
+            if _is_standard:
+                st.session_state["_nb_sample"] = 1
             st.number_input(
                 "Nombre d'échantillons",
                 step=1, min_value=1, value=1, format="%d",
                 key="_nb_sample",
+                disabled=_is_standard,
             )
-
+        st.space()
+        if st.session_state["metadata_error"]:
+            st.warning(st.session_state["metadata_error"])
         for i in range(1, int(st.session_state["_nb_sample"]) + 1):
             st.divider()
             st.subheader(f"Prélèvement de l'échantillon {i}")
@@ -856,7 +892,9 @@ with tab_metadata:
         # )
 
     st.dataframe(st.session_state["df_collect_times"], hide_index=True)
-    st.write(st.session_state)
+    
+    # st.write(st.session_state)
+
 
 # ── TAB 2 : CONTAINERS ────────────────────────────────────────────────────────
 with tab_containers:
@@ -1078,4 +1116,3 @@ with tab_summary:
         st.markdown(f"#### Échantillon {sample_id} — masse totale : {total_sample_net:.2f} kg")
         st.dataframe(df_sample_summary, hide_index=True)
         st.divider()
-
