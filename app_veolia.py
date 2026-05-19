@@ -8,6 +8,7 @@ import zipfile
 import json
 import uuid
 from pathlib import Path
+from streamlit_extras.card_selector import card_selector
 
 import tempfile
 TEMP_DIR = Path(tempfile.gettempdir()) / "wastechar_sessions"
@@ -62,6 +63,7 @@ DEFAULTS = {
     "saved_nb_sample":    1,
     "Image": pd.Series(dtype="object"),
     "image_uploader_key": 0,
+    "saved_workflow" : 0,
     "df_containers": pd.DataFrame({
         "Contenant": pd.Series(dtype="str"),
         "Poids à vide": pd.Series(dtype="float")
@@ -108,6 +110,7 @@ def save_session() -> None:
                 .to_json(orient="records")
             ),
             "metadata": {
+                "workflow": st.session_state.get("saved_workflow", 0),
                 "operator":  st.session_state.get("saved_operator_name", ""),
                 "sensor":    st.session_state.get("saved_sensor_name", ""),
                 "nb_sample": st.session_state.get("saved_nb_sample", 1),
@@ -161,6 +164,11 @@ def restore_session() -> None:
         st.session_state["saved_operator_name"] = meta.get("operator", "")
         st.session_state["saved_sensor_name"]   = meta.get("sensor", sensor_list[0])
         st.session_state["saved_nb_sample"]     = int(meta.get("nb_sample", 1))
+        wf = meta.get("workflow", 0)
+        if isinstance(wf, str):
+            _wf_titles = ["Standard", "Closed loop", "Split samples"]
+            wf = _wf_titles.index(wf) if wf in _wf_titles else 0
+        st.session_state["saved_workflow"] = wf
         st.session_state["saved_test_date"]     = dt.date.fromisoformat(
             meta.get("date", str(dt.date.today()))
         )
@@ -169,6 +177,7 @@ def restore_session() -> None:
         st.session_state.pop("_sensor_name", None)
         st.session_state.pop("_nb_sample", None)
         st.session_state.pop("_test_date", None)
+        st.session_state.pop("workflow_type", None)
     except Exception:
         pass  # corrupt file — start fresh silently
 
@@ -235,13 +244,13 @@ def get_container_weight(container_name: str) -> float:
     return float(row.iloc[0]["Poids à vide"])
 
 
-def _clean_time_widget_keys(nb_sample: int) -> None:
-    i = nb_sample + 1
-    while f"_start_{i}_h" in st.session_state:
-        for key in (f"_start_{i}_h", f"_start_{i}_m", f"_start_{i}_s",
-                    f"_end_{i}_h",   f"_end_{i}_m",   f"_end_{i}_s"):
-            st.session_state.pop(key, None)
-        i += 1
+# def _clean_time_widget_keys(nb_sample: int) -> None:
+#     i = nb_sample + 1
+#     while f"_start_{i}_h" in st.session_state:
+#         for key in (f"_start_{i}_h", f"_start_{i}_m", f"_start_{i}_s",
+#                     f"_end_{i}_h",   f"_end_{i}_m",   f"_end_{i}_s"):
+#             st.session_state.pop(key, None)
+#         i += 1
 
 
 def init_metadata_widget_state() -> None:
@@ -307,6 +316,7 @@ def save_metadata() -> None:
     st.session_state["saved_test_date"]     = st.session_state["_test_date"]
     save_session()
 
+
 def add_container() -> None:
     container_name   = st.session_state["container_name"].strip()
     # On s'assure que le poids est bien un float
@@ -345,6 +355,7 @@ def add_container() -> None:
     st.session_state["container_error"] = ""
     save_session()
 
+
 def remove_container(container_name: str) -> None:
     st.session_state["df_containers"] = (
         st.session_state["df_containers"]
@@ -360,6 +371,7 @@ def remove_container(container_name: str) -> None:
     st.session_state["container_error"] = ""
     st.rerun()
     save_session()
+
 
 def add_weighing() -> None:
     gross_weight_text = st.session_state["gross_weight"].strip()
@@ -434,6 +446,7 @@ def add_weighing() -> None:
     st.session_state["image_uploader_key"] += 1
     save_session()
 
+
 def delete_weighing(idx: int) -> None:
     st.session_state["df_weighings"] = (
         st.session_state["df_weighings"]
@@ -443,6 +456,7 @@ def delete_weighing(idx: int) -> None:
     st.session_state["weighing_error"] = ""
     st.rerun()
     save_session()
+
 
 def summarize_by_material(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -585,7 +599,7 @@ def upload_to_dropbox(excel_buffer, file_name):
         dbx.files_upload(
             excel_buffer.getvalue(), 
             full_path, 
-            mode=dropbox.files.WriteMode.overwrite
+            mode=dropbox.files.WriteMode.overwrite # type: ignore
         )
         return True
     except Exception as e:
@@ -636,6 +650,79 @@ def build_zip_export() -> io.BytesIO:
 
     buf.seek(0)
     return buf
+
+
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+
+    # ── Session info ──────────────────────────────────────────────────────────
+    st.markdown(f"**{FACILITY_NAME}**")
+    st.caption(
+        f"🧑 {st.session_state.get('saved_operator_name') or 'Opérateur non renseigné'}  \n"
+        f"📅 {st.session_state.get('saved_test_date') or '—'}  \n"
+        f"📡 {st.session_state.get('saved_sensor_name') or '—'}  \n"
+        f"⚖️ {len(st.session_state['df_weighings'])} pesée(s) enregistrée(s)"
+    )
+
+    st.divider()
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    has_data = not st.session_state["df_weighings"].empty
+    if has_data:
+        timestamp   = dt.datetime.now().strftime("%Y%m%d_%H%M")
+        sensor_name = st.session_state["saved_sensor_name"].replace(" ", "_")
+        base_name   = f"Resultat_{FACILITY_NAME}_{sensor_name}_{timestamp}"
+        zip_data    = build_zip_export()
+
+        st.download_button(
+            "⬇️ Télécharger (Excel + photos)",
+            data=zip_data,
+            file_name=f"{base_name}.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+        if not DEV_MODE:
+            if st.button("☁️ Sauvegarder sur Dropbox", use_container_width=True):
+                with st.spinner("Envoi en cours..."):
+                    if upload_to_dropbox(zip_data, f"{base_name}.zip"):
+                        st.toast("Sauvegardé sur Dropbox !", icon="☁️")
+        else:
+            st.caption("DEV MODE — Dropbox désactivé.")
+    else:
+        st.caption("Aucune pesée enregistrée — l'export sera disponible ici.")
+
+    st.divider()
+
+    # ── Session management ────────────────────────────────────────────────────
+    st.caption("Démarre une session vierge et efface toutes les données.")
+    if st.button("🔄 Nouvelle session", use_container_width=True, type="secondary"):
+        clear_session()
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.query_params.clear()
+        st.rerun()
+
+    st.divider()
+
+    # ── Help & links ──────────────────────────────────────────────────────────
+    st.link_button("🌐 wasteflow.ai", "https://wasteflow.ai", use_container_width=True)
+
+    with st.expander("📖 Guide d'utilisation"):
+        st.info("💡 Suivez les 4 onglets dans l'ordre.")
+        st.markdown("""
+**1️⃣ Métadonnées** — Nom, date, capteur et heures de prélèvement.
+
+**2️⃣ Contenants** — Cartons avec leur poids à vide (tare).
+
+**3️⃣ Résultats de pesée** — Classe, contenant, poids brut(s) séparés par des espaces.
+
+**4️⃣ Résumé** — Visualisation et téléchargement du fichier final.
+""")
+        st.success("✅ Sauvegardez localement et dans le cloud.")
+
+    st.divider()
+
+
 # ── TITLE ─────────────────────────────────────────────────────────────────────
 st.title(f"Caractérisation — {FACILITY_NAME}")
 
@@ -648,7 +735,7 @@ tab_metadata, tab_containers, tab_weighing, tab_summary = st.tabs(
 # ── TAB 1 : METADATA ──────────────────────────────────────────────────────────
 with tab_metadata:
     init_metadata_widget_state()
-    with st.expander("📖 Guide d'utilisation", expanded=False):
+    with st.expander("⁉️ Guide d'utilisation", expanded=False):
         st.image(".streamlit/images/process carac.png", width='stretch')
 
         st.markdown("## Comment utiliser ce formulaire ?")
@@ -721,11 +808,26 @@ with tab_metadata:
     # st.subheader("Métadonnées")
 
     with st.container(border=True):
+        
+        
+        st.subheader("Type de workflow")
+        workflow = card_selector(
+            [
+                dict(title="Standard", icon="📦", description="Capteur Wasteflow -> Récolte échantillon -> Pesée"),
+                dict(title="Closed loop", icon="🔄", description="Les matériaux sont réintroduits dans le process"),
+                dict(title="Split samples", icon="✂️", description="Plusieurs récoltes d'échantillon à des heures différentes, ensuite mélangées en une seule pesée"),
+            ], # type: ignore
+            selection_mode="single",
+            default=st.session_state.get("saved_workflow", 0),
+            key="workflow_type",
+        ) # type: ignore
+        st.space()
         st.markdown("### Informations spécifiques au test")
+        st.session_state["saved_workflow"] = workflow
         r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-        with r1c1: st.text_input("Nom", placeholder="Entrez votre nom", key="_operator_name")
-        with r1c2: st.date_input("Date du jour", key="_test_date")
-        with r1c3: st.selectbox("Nom du capteur", sensor_list, key="_sensor_name", index=0)
+        with r1c1: st.text_input("Nom", placeholder="Entrez votre nom", key="_operator_name", on_change=save_metadata)
+        with r1c2: st.date_input("Date du jour", key="_test_date", on_change=save_metadata)
+        with r1c3: st.selectbox("Nom du capteur", sensor_list, key="_sensor_name", index=0, on_change=save_metadata)
         with r1c4:
             st.number_input(
                 "Nombre d'échantillons",
@@ -733,7 +835,6 @@ with tab_metadata:
                 key="_nb_sample",
             )
 
-        # Dans tab_metadata, remplacez la boucle for par celle-ci :
         for i in range(1, int(st.session_state["_nb_sample"]) + 1):
             st.divider()
             st.subheader(f"Prélèvement de l'échantillon {i}")
@@ -755,7 +856,7 @@ with tab_metadata:
         # )
 
     st.dataframe(st.session_state["df_collect_times"], hide_index=True)
-
+    st.write(st.session_state)
 
 # ── TAB 2 : CONTAINERS ────────────────────────────────────────────────────────
 with tab_containers:
@@ -953,7 +1054,7 @@ with tab_summary:
             fig, ax = plt.subplots()
             ax.pie(
                 df_summary_by_material["Pourcentage de la masse totale"],
-                labels=df_summary_by_material["Classe de matériau"],
+                labels=df_summary_by_material["Classe de matériau"], # type: ignore
                 autopct="%1.1f%%",
             )
             ax.set_title("Répartition par classe de matériau")
