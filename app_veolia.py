@@ -4,6 +4,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import io
 import dropbox
+import dropbox.exceptions
+import dropbox.files
 import zipfile 
 import json
 import uuid
@@ -59,13 +61,12 @@ DEFAULTS = {
     "weighing_error":  "",
     "saved_operator_name": "",
     "saved_test_date":    dt.date.today(),
-    "saved_sensor_name":  "1",
+    "saved_sensor_name":  sensor_list[0] if sensor_list else "",
     "saved_nb_sample":    1,
-    "Image": pd.Series(dtype="object"),
+    # "Image": pd.Series(dtype="object"),
     "image_uploader_key": 0,
     "saved_workflow" : 0,
     "saved_workflow_order": 0,
-    "metadata_error": "",
     "df_containers": pd.DataFrame({
         "Contenant": pd.Series(dtype="str"),
         "Poids à vide": pd.Series(dtype="float")
@@ -242,6 +243,21 @@ def get_sample_collect_times(sample_id: int):
     }
 
 
+def _clean_time_widget_keys(nb_sample: int) -> None:
+    """Remove widget keys for sample indices above nb_sample.
+    Call this after saving metadata to prevent orphan keys accumulating
+    when the operator reduces the number of samples."""
+    i = nb_sample + 1
+    while any(f"_start_{i}_h" in st.session_state for _ in [None]):
+        for key in (
+            f"_start_{i}_h", f"_start_{i}_m", f"_start_{i}_s",
+            f"_end_{i}_h",   f"_end_{i}_m",   f"_end_{i}_s",
+            f"_date_{i}",
+        ):
+            st.session_state.pop(key, None)
+        i += 1
+
+
 def get_container_weight(container_name: str) -> float:
     if not container_name:
         return 0.0
@@ -324,6 +340,7 @@ def save_metadata() -> None:
     st.session_state["saved_operator_name"] = st.session_state["_operator_name"]
     st.session_state["saved_test_date"]     = st.session_state["_test_date"]
     st.session_state["metadata_error"] = ""
+    _clean_time_widget_keys(nb_sample)
     save_session()
 
 
@@ -379,8 +396,8 @@ def remove_container(container_name: str) -> None:
         .reset_index(drop=True)
     )
     st.session_state["container_error"] = ""
-    st.rerun()
     save_session()
+    st.rerun()
 
 
 def add_weighing() -> None:
@@ -413,7 +430,6 @@ def add_weighing() -> None:
     tare_weight = get_container_weight(container_used)
     weights     = [float(w.replace(",", ".")) for w in gross_weight_text.split()]
 
-    new_rows = []
     img_key = f"weighing_image_{st.session_state['image_uploader_key']}"
     for gross_weight in weights:
         net_weight = gross_weight - tare_weight
@@ -464,8 +480,8 @@ def delete_weighing(idx: int) -> None:
         .reset_index(drop=True)
     )
     st.session_state["weighing_error"] = ""
-    st.rerun()
     save_session()
+    st.rerun()
 
 
 def summarize_by_material(df: pd.DataFrame) -> pd.DataFrame:
@@ -544,7 +560,7 @@ def build_excel_export() -> io.BytesIO:
 
         # ── One sheet per sample ──────────────────────────────────────────────
         for sample_id in sorted(df_agg["N° échantillon"].unique()):
-            df_s       = df_agg[df_agg["N° échantillon"] == sample_id].iloc[0]
+            # df_s       = df_agg[df_agg["N° échantillon"] == sample_id].iloc[0]
 
             sample_id_list = [int(s.strip()) for s in str(sample_id).split(",")]
             time_rows = []
@@ -578,23 +594,21 @@ def build_excel_export() -> io.BytesIO:
             times_df.to_excel( writer, sheet_name=sheet_name, index=False, startrow=0)
             df_sample.to_excel(writer, sheet_name=sheet_name, index=False, startrow=len(times_df) + 2)
         # ── Metadata sheet ────────────────────────────────────────────────────
+        _wf_labels  = {0: "Standard", 1: "Multi-échantillon"}
+        _wfo_labels = {0: "A", 1: "B"}
         df_weighings = st.session_state["df_weighings"]
-        _wf_titles  = ["Standard", "Multi-échantillon"]
-        _wfo_titles = ["A", "B"]
-        _wf_idx  = st.session_state.get("saved_workflow", 0)
-        _wfo_idx = st.session_state.get("saved_workflow_order", 0)
         pd.DataFrame([
-            {"field": "Operator name",       "value": st.session_state["saved_operator_name"]},
-            {"field": "Test date",           "value": str(st.session_state["saved_test_date"])},
-            {"field": "Sensor name",         "value": st.session_state["saved_sensor_name"]},
-            {"field": "Workflow",            "value": _wf_titles[_wf_idx] if isinstance(_wf_idx, int) else "—"},
-            {"field": "Workflow order",      "value": _wfo_titles[_wfo_idx] if isinstance(_wfo_idx, int) else "—"},
-            {"field": "Number of samples",   "value": st.session_state["saved_nb_sample"]},
-            {"field": "Number of weighings", "value": len(df_weighings)},
+            {"field": "Operator name",         "value": st.session_state["saved_operator_name"]},
+            {"field": "Test date",             "value": str(st.session_state["saved_test_date"])},
+            {"field": "Sensor name",           "value": st.session_state["saved_sensor_name"]},
+            {"field": "Workflow",              "value": _wf_labels.get(st.session_state.get("saved_workflow"), "—")},
+            {"field": "Workflow order",        "value": _wfo_labels.get(st.session_state.get("saved_workflow_order"), "—")},
+            {"field": "Number of samples",     "value": st.session_state["saved_nb_sample"]},
+            {"field": "Number of weighings",   "value": len(df_weighings)},
             {"field": "Total net weight (kg)", "value": round(df_weighings["Poids net"].sum(), 4) if not df_weighings.empty else 0},
             {"field": "Material classes used", "value": ", ".join(sorted(df_weighings["Classe de matériau"].unique())) if not df_weighings.empty else ""},
-            {"field": "Containers used",     "value": ", ".join(sorted(df_weighings["Contenant utilisé"].replace("", pd.NA).dropna().unique())) if not df_weighings.empty else ""},
-            {"field": "Export timestamp", "value": (dt.datetime.now(dt.timezone(dt.timedelta(hours=2))).strftime("%Y-%m-%d %H:%M:%S"))},
+            {"field": "Containers used",       "value": ", ".join(sorted(df_weighings["Contenant utilisé"].replace("", pd.NA).dropna().unique())) if not df_weighings.empty else ""},
+            {"field": "Export timestamp",      "value": dt.datetime.now(dt.timezone(dt.timedelta(hours=2))).strftime("%Y-%m-%d %H:%M:%S")},
         ]).to_excel(writer, sheet_name="Metadata", index=False)
     buf.seek(0)
     return buf
@@ -602,25 +616,34 @@ def build_excel_export() -> io.BytesIO:
 
 def upload_to_dropbox(excel_buffer, file_name):
     try:
-        # Initialisation avec Refresh Token pour une connexion permanente
         dbx = dropbox.Dropbox(
             app_key=st.secrets["DROPBOX_APP_KEY"],
             app_secret=st.secrets["DROPBOX_APP_SECRET"],
             oauth2_refresh_token=st.secrets["DROPBOX_REFRESH_TOKEN"]
         )
-        
-        path = st.secrets.get("DROPBOX_DESTINATION_PATH", "/")
-        full_path = f"{path}{file_name}".replace("//", "/")
-        
+    except KeyError as e:
+        st.error(f"Dropbox — clé de configuration manquante : {e}")
+        return False
+    except Exception as e:
+        st.error(f"Dropbox — échec de l'authentification : {e}")
+        return False
+
+    path = st.secrets.get("DROPBOX_DESTINATION_PATH", "/")
+    full_path = f"{path}{file_name}".replace("//", "/")
+    try:
         dbx.files_upload(
-            excel_buffer.getvalue(), 
-            full_path, 
-            mode=dropbox.files.WriteMode.overwrite # type: ignore
+            excel_buffer.getvalue(),
+            full_path,
+            mode=dropbox.files.WriteMode.overwrite  # type: ignore
         )
         return True
+    except dropbox.exceptions.AuthError as e:
+        st.error(f"Dropbox — token expiré ou invalide : {e}")
+    except dropbox.exceptions.ApiError as e:
+        st.error(f"Dropbox — erreur API lors de l'upload ({full_path}) : {e}")
     except Exception as e:
-        st.error(f"Erreur lors de l'envoi vers Dropbox : {e}")
-        return False
+        st.error(f"Dropbox — erreur inattendue lors de l'upload : {e}")
+    return False
     
 
 def hms_widget(label, key_prefix, on_change_callback):
@@ -670,16 +693,21 @@ def build_zip_export() -> io.BytesIO:
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-
     # ── Session info ──────────────────────────────────────────────────────────
     st.markdown(f"**{FACILITY_NAME}**")
-    st.caption(
-        f"Opérateur :  {st.session_state.get('saved_operator_name') or 'Opérateur non renseigné'}  \n"
-        f"Date : {st.session_state.get('saved_test_date') or '—'}  \n"
-        f"Capteur testé : {st.session_state.get('saved_sensor_name') or '—'}  \n"
-        f"Ordre de passage : {['A', 'B'][st.session_state['saved_workflow_order']] if isinstance(st.session_state.get('saved_workflow_order'), int) else '—'}  \n"
-        f"Workflow : {['Standard', 'Multi-échantillon'][st.session_state['saved_workflow']] if isinstance(st.session_state.get('saved_workflow'), int) else '—'}  \n"
-        f"Nombre de pesées :  {len(st.session_state['df_weighings'])}"
+    _wf_label  = ['Standard', 'Multi-échantillon'][st.session_state['saved_workflow']] if isinstance(st.session_state.get('saved_workflow'), int) else '—'
+    _wfo_label = ['A', 'B'][st.session_state['saved_workflow_order']] if isinstance(st.session_state.get('saved_workflow_order'), int) else '—'
+    st.dataframe(
+        pd.DataFrame([
+            ("Opérateur",      st.session_state.get("saved_operator_name") or "—"),
+            ("Date",           str(st.session_state.get("saved_test_date") or "—")),
+            ("Capteur",        st.session_state.get("saved_sensor_name") or "—"),
+            ("Ordre",          _wfo_label),
+            ("Workflow",       _wf_label),
+            ("Nb pesées",      len(st.session_state["df_weighings"])),
+        ], columns=["Champ", "Valeur"]),
+        hide_index=True,
+        use_container_width=True,
     )
 
     st.divider()
@@ -690,21 +718,22 @@ with st.sidebar:
         timestamp   = dt.datetime.now().strftime("%Y%m%d_%H%M")
         sensor_name = st.session_state["saved_sensor_name"].replace(" ", "_")
         base_name   = f"Resultat_{FACILITY_NAME}_{sensor_name}_{timestamp}"
-        zip_data    = build_zip_export()
+        # zip_data    = build_zip_export()
 
-        st.download_button(
+        if st.download_button(
             "⬇️ Télécharger (Excel + photos)",
-            data=zip_data,
+            data=build_zip_export(),
             file_name=f"{base_name}.zip",
             mime="application/zip",
             use_container_width=True,
-        )
-        if not DEV_MODE:
-            if st.button("☁️ Sauvegarder sur Dropbox", use_container_width=True):
-                with st.spinner("Envoi en cours..."):
-                    if upload_to_dropbox(zip_data, f"{base_name}.zip"):
+        ) and not DEV_MODE:
+            with st.spinner("Envoi sur Dropbox..."):
+                try:
+                    if upload_to_dropbox(build_zip_export(), f"{base_name}.zip"):
                         st.toast("Sauvegardé sur Dropbox !", icon="☁️")
-        else:
+                except Exception:
+                    pass
+        if DEV_MODE:
             st.caption("DEV MODE — Dropbox désactivé.")
     else:
         st.caption("Aucune pesée enregistrée — l'export sera disponible ici.")
@@ -846,7 +875,7 @@ with tab_metadata:
             default=st.session_state.get("saved_workflow", 0),
             key="workflow_type",
         ) # type: ignore
-        st.space()
+        st.write("")
         st.markdown("### Informations spécifiques au test")
         _prev_wf  = st.session_state.get("saved_workflow")
         _prev_wfo = st.session_state.get("saved_workflow_order")
@@ -860,15 +889,18 @@ with tab_metadata:
         with r1c3: st.selectbox("Nom du capteur", sensor_list, key="_sensor_name", index=0, on_change=save_metadata)
         with r1c4:
             _is_standard = st.session_state.get("saved_workflow", 0) == 0
-            if _is_standard:
-                st.session_state["_nb_sample"] = 1
             st.number_input(
                 "Nombre d'échantillons",
-                step=1, min_value=1, value=1, format="%d",
+                step=1,
+                min_value=1,
+                max_value=1 if _is_standard else 100,
+                value=1 if _is_standard else st.session_state.get("saved_nb_sample", 1),
+                format="%d",
                 key="_nb_sample",
                 disabled=_is_standard,
+                on_change=save_metadata,
             )
-        st.space()
+        st.write("")
         if st.session_state["metadata_error"]:
             st.warning(st.session_state["metadata_error"])
         for i in range(1, int(st.session_state["_nb_sample"]) + 1):
@@ -884,16 +916,9 @@ with tab_metadata:
             with col_end:
                 hms_widget("Heure de fin", f"_end_{i}", save_metadata)
 
-        st.space()
-        # st.button(
-        #     "💾 Enregistrer les métadonnées",
-        #     on_click=save_metadata,
-        #     key="save_metadata_button",
-        # )
-
+        st.write("")
     st.dataframe(st.session_state["df_collect_times"], hide_index=True)
     
-    # st.write(st.session_state)
 
 
 # ── TAB 2 : CONTAINERS ────────────────────────────────────────────────────────
@@ -940,7 +965,6 @@ with tab_containers:
             c1, c2, c3 = st.columns([3, 2, 1])
             c1.write(row["Contenant"])
             c2.write(f"{row['Poids à vide']:.3f} kg")
-            # Suppression du st.rerun() ici aussi
             if c3.button("Supprimer", key=f"del_{row['Contenant']}"):
                 remove_container(row["Contenant"])
 
@@ -1032,8 +1056,6 @@ with tab_weighing:
         for idx, row in df_w.iterrows():
             r = st.columns([1, 2, 2, 1.5, 1.5, 1])
             r[0].write(row["N° échantillon"])
-            # r[1].write(str(row["Début"]))
-            # r[2].write(str(row["Fin"]))
             r[1].write(row["Classe de matériau"])
             r[2].write(row["Contenant utilisé"])
             r[3].write(f"{row['Poids brut']:.3f}")
@@ -1041,7 +1063,6 @@ with tab_weighing:
             # Suppression sans st.rerun()
             if r[5].button("✕", key=f"del_w_{idx}"):
                 delete_weighing(idx)
-    # weighing_section() 
 
 
 # ── TAB 4 : SUMMARY ───────────────────────────────────────────────────────────
@@ -1056,12 +1077,18 @@ with tab_summary:
             st.subheader("Sauvegarde")
             col1, col2 = st.columns(2)
             with col1:
-                st.download_button(
+                if st.download_button(
                     "⬇️ Télécharger (Excel + photos)",
                     data=zip_data,
                     file_name=f"{base_name}.zip",
                     mime="application/zip",
-                )
+                ) and not DEV_MODE:
+                    with st.spinner("Envoi sur Dropbox..."):
+                        try:
+                            if upload_to_dropbox(zip_data, f"{base_name}.zip"):
+                                st.toast("Sauvegardé sur Dropbox !", icon="☁️")
+                        except Exception:
+                            pass
             with col2:
                 if not DEV_MODE:
                     if st.button("☁️ Sauvegarder dans le Cloud (Dropbox)"):
@@ -1073,10 +1100,10 @@ with tab_summary:
                                 status.update(label="❌ Échec de l'envoi", state="error")
                 else:
                     st.info("DEV MODE — Dropbox upload désactivé.")
-            if st.button("🗑️ Terminer et effacer la session"):
-                clear_session()
-                st.query_params.clear()
-                st.rerun()
+            # if st.button("🗑️ Terminer et effacer la session"):
+            #     clear_session()
+            #     st.query_params.clear()
+            #     st.rerun()
     else:
         st.info("Aucune pesée enregistrée — l'export sera disponible ici.")
     # st.subheader("Résumé de la caractérisation")
